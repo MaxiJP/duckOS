@@ -51,12 +51,17 @@ public:
 		return *this = *this * other;
 	}
 
-	[[nodiscard]] constexpr Color lightened(float amount = 0.2) const {
-		amount = 1 + amount;
-		return Color((uint8_t) std::min(((float) r * amount), 255.0f),
-					 (uint8_t) std::min(((float) g * amount), 255.0f),
-					 (uint8_t) std::min(((float) b * amount), 255.0f),
-					 a);
+	[[nodiscard]] constexpr Color operator+(Color other) const {
+		return {
+				(uint8_t)(r + other.r),
+				(uint8_t)(g + other.g),
+				(uint8_t)(b + other.b),
+				(uint8_t)(a + other.a)
+		};
+	}
+
+	[[nodiscard]] constexpr Color lightened(float amount = 0.25) const {
+		return darkened(1 + amount);
 	}
 
 	[[nodiscard]] constexpr Color darkened(float amount = 0.2) const {

@@ -163,39 +163,11 @@ void Window::repaint_now() {
 	auto framebuffer = _window->framebuffer();
 	auto ctx = DrawContext(framebuffer);
 	if(_decorated) {
-		Gfx::Color bg_color = Theme::window();
-		Gfx::Color accent_color = _focused ? Theme::accent() : bg_color;
-
-		auto title_area_height = UI_TITLEBAR_HEIGHT + accessory_rect().height + UI_WINDOW_PADDING * (has_accessory() ? 2 : 0);
-		Gfx::Rect titlebar_rect = {0, 0, ctx.width(), UI_TITLEBAR_HEIGHT};
-		Gfx::Rect titlebar_and_accessory_rect = titlebar_rect.inset(0, 0, -accessory_rect().height - (has_accessory() ? UI_WINDOW_PADDING * 2 : 0), 0);
-
-		ctx.draw_outset_rect(
-				{0, 0, ctx.width(), ctx.height()},
-				bg_color,
-				bg_color,
-				bg_color.darkened(0.3),
-				bg_color.darkened(0.4),
-				bg_color.lightened());
-
-		ctx.draw_inset_rect(
-				{1, title_area_height - 2, ctx.width() - 3, ctx.height() - title_area_height},
-				bg_color,
-				bg_color,
-				bg_color.darkened(0.3),
-				bg_color.darkened(0.4),
-				bg_color.lightened());
-
-		ctx.fill({0, 0, ctx.width() - 1, 1}, accent_color.lightened());
-		ctx.fill({0, 0, 1, titlebar_and_accessory_rect.height - 2}, accent_color.lightened());
-		ctx.fill({ctx.width() - 1, 0, 1, titlebar_and_accessory_rect.height - 2}, accent_color.darkened(0.4));
-		ctx.fill({ctx.width() - 2, 1, 1, titlebar_and_accessory_rect.height - 3}, accent_color.darkened(0.3));
-		ctx.fill({0, titlebar_and_accessory_rect.height - 2, 1, 1}, accent_color.lightened(0.3).mixed(bg_color.lightened(0.3), 0.5));
-		ctx.fill({ctx.width() - 2, titlebar_and_accessory_rect.height - 2, 1, 1}, accent_color.darkened(0.3).mixed(bg_color.darkened(0.3), 0.5));
-		ctx.fill({ctx.width() - 1, titlebar_and_accessory_rect.height - 2, 1, 1}, accent_color.darkened(0.4).mixed(bg_color.darkened(0.4), 0.5));
-		ctx.fill({1, titlebar_and_accessory_rect.height - 2, ctx.width() - 3, 1}, accent_color.darkened(0.3).mixed(bg_color.darkened(0.3), 0.5));
-		ctx.fill_gradient_v({1, 1, ctx.width() - 3, titlebar_and_accessory_rect.height - 3}, accent_color, accent_color.darkened());
-//		ctx.draw_outset_rect(titlebar_and_accessory_rect, Theme::accent());
+		//Window background
+		if(_uses_alpha)
+			ctx.fill({0, 0, ctx.width(), ctx.height()}, Gfx::Color(0, 0, 0, 0));
+		else
+			ctx.fill({0, 0, ctx.width(), ctx.height()}, Theme::window());
 
 		//Title bar
 

@@ -145,3 +145,7 @@ void Window::set_has_shadow(bool shadow) {
 void Window::set_minimum_size(Gfx::Dimensions dimensions) {
 	_context->__river_set_minimum_size({_id, dimensions});
 }
+
+void Window::set_blur_behind(bool blur) {
+	_context->__river_set_hint({_id, PWINDOW_HINT_BLURBEHIND, (int) blur});
+}

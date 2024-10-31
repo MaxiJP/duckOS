@@ -77,23 +77,6 @@ namespace Gfx {
 		void copy_blitting(const Framebuffer& other, Rect other_area, const Point& pos) const;
 
 		/**
-		 * Copies a part of another Image to this one, with alpha blending, flipped horizontally.
-		 * @param other The other Image to copy from.
-		 * @param other_area The area of the other Image to copy.
-		 * @param pos The position of this Image to copy to.
-		 * @param flip_h Whether to flip vertically.
-		 * @param flip_v Whether to flip horizontally.
-		 */
-		void copy_blitting_flipped(const Framebuffer& other, Rect other_area, const Point& pos, bool flip_h, bool flip_v) const;
-
-		/*
-		 * Blurs an area of this framebuffer with an approximated gaussian blur.
-		 * @param area The area to blur.
-		 * @param radius The blur radius.
-		 */
-		void blur(Rect area, int radius = 4) const;
-
-		/**
 		 * Identical to ::copy(), but will tile the Image.
 		 */
 		void copy_tiled(const Framebuffer& other, Rect other_area, const Point& pos) const;
@@ -152,18 +135,6 @@ namespace Gfx {
 		void fill_gradient_v(Rect area, Color color_a, Color color_b) const;
 
 		/**
-		 * Inverts an area of the Image.
-		 * @param area The area to invert.
-		 */
-		void invert(Rect area) const;
-
-		/**
-		 * Inverts an area of the Image with a checkered pattern.
-		 * @param area The area to invert.
-		 */
-		void invert_checkered(Rect area) const;
-
-		/**
 		 * Draws the outline of an area on the Image.
 		 * @param area The rect of the area to outline.
 		 * @param color The color to draw the outline in.
@@ -178,35 +149,13 @@ namespace Gfx {
 		void outline_blitting(Rect area, Color color) const;
 
 		/**
-		 * Outlines an area on the Framebuffer by inverting the colors.
-		 * @param area The area to outline.
-		 */
-		void outline_inverting(Rect area) const;
-
-		/**
-		 * Outlines an area on the Framebuffer by inverting the colors with a checker pattern.
-		 * @param area The area to outline.
-		 */
-		void outline_inverting_checkered(Rect area) const;
-
-		/**
 		 * Draws text on the Image with a certain color.
 		 * @param str The string to draw.
 		 * @param pos The top-left position of where to draw.
 		 * @param font The font to use.
 		 * @param color The color to draw in.
 		 */
-		Point draw_text(const char* str, const Point& pos, Font* font, Color color) const;
-
-		/**
-		 * Draws text on the Image with a certain color.
-		 * @param str The string to draw. Does not need to be zero-terminated.
-		 * @param len The length of the string to draw.
-		 * @param pos The top-left position of where to draw.
-		 * @param font The font to use.
-		 * @param color The color to draw in.
-		 */
-		Point draw_text(const char* str, size_t len, const Point& pos, Font* font, Color color) const;
+		void draw_text(const char* str, const Point& pos, Font* font, Color color) const;
 
 		/**
 		 * Draws a glyph on the Image with a certain color.
@@ -228,18 +177,6 @@ namespace Gfx {
 		 * Returns a pointer to the Image buffer at a certain position. Returns NULL if outside the constraints.
 		 */
 		Color* at(const Point& position) const;
-
-		/**
-		 * Returns a reference to the Image buffer at a certain position without bounds checking.
-		 */
-		inline constexpr Color& ref_at(const Point& position) const {
-			return data[position.x + position.y * width];
-		}
-
-		/**
-		 * Puts a pixel at a point.
-		 */
-		void put(Gfx::Point point, Gfx::Color color) const;
 
 		/// Serializable
 		size_t serialized_size() const override;
