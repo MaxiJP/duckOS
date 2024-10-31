@@ -128,6 +128,13 @@ std::shared_ptr<Window> Widget::root_window() {
 	return nullptr;
 }
 
+std::shared_ptr<Widget> Widget::widget_at(Gfx::Point pos) {
+	for(auto& child : children)
+		if(pos.in(child->_rect))
+			return child->widget_at(pos - child->_rect.position());
+	return self();
+}
+
 void Widget::add_child(const std::shared_ptr<Widget>& child) {
 	if(child->parent() || child->parent_window())
 		return;
@@ -152,6 +159,10 @@ bool Widget::remove_child(const std::shared_ptr<Widget>& child) {
 	if(needs_layout_on_child_change())
 		update_layout();
 	return true;
+}
+
+const std::vector<Duck::Ptr<Widget>>& Widget::get_children() {
+	return children;
 }
 
 void Widget::set_position(const Gfx::Point& position) {
@@ -210,6 +221,18 @@ void Widget::focus() {
 void Widget::open_menu(Duck::Ptr<UI::Menu> menu) {
 	if(_root_window)
 		_root_window->open_menu(menu);
+}
+
+bool Widget::window_draggable() const {
+	return _window_draggable;
+}
+
+void Widget::set_window_draggable(bool draggable) {
+	_window_draggable = draggable;
+}
+
+bool Widget::receives_drag_events() {
+	return false;
 }
 
 void Widget::set_window(Duck::PtrRef<Window> window) {

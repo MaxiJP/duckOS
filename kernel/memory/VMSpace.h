@@ -6,8 +6,9 @@
 #include "../kstd/Arc.h"
 #include "VMRegion.h"
 #include "../Result.hpp"
-#include "../tasking/SpinLock.h"
-#include "PageDirectory.h"
+#include "../tasking/Mutex.h"
+#include <kernel/memory/PageDirectory.h>
+#include <kernel/kstd/Iteration.h>
 
 /**
  * This class represents a virtual memory address space and all of the regions it contains. It's used to allocate and
@@ -37,6 +38,14 @@ public:
 	 * @return The newly created region.
 	 */
 	ResultRet<kstd::Arc<VMRegion>> map_object(kstd::Arc<VMObject> object, VMProt prot, VirtualRange range = VirtualRange::null, VirtualAddress object_start = 0);
+
+	/**
+	 * Allocates a new region for the given object with sentinel pages on either side.
+	 * @param object The object to allocate a region for.
+	 * @param prot The protection to use.
+	 * @return The newly created region.
+	 */
+	ResultRet<kstd::Arc<VMRegion>> map_object_with_sentinel(kstd::Arc<VMObject> object, VMProt prot);
 
 	/**
 	 * Allocates a new region for the given object near the end of the memory space.
@@ -102,11 +111,16 @@ public:
 	 */
 	size_t calculate_regular_anonymous_total();
 
+	/**
+	 * Iterates over all VMRegions in the space.
+	 */
+	void iterate_regions(kstd::IterationFunc<VMRegion*> callback);
+
 	VirtualAddress start() const { return m_start; }
 	size_t size() const { return m_size; }
 	VirtualAddress end() const { return m_start + m_size; }
 	size_t used() const { return m_used; }
-	SpinLock& lock() { return m_lock; }
+	Mutex& lock() { return m_lock; }
 
 private:
 	struct VMSpaceRegion {
@@ -129,6 +143,6 @@ private:
 	size_t m_size;
 	VMSpaceRegion* m_region_map;
 	size_t m_used = 0;
-	SpinLock m_lock;
+	Mutex m_lock {"VMSpace"};
 	PageDirectory& m_page_directory;
 };

@@ -9,6 +9,7 @@
 template<typename T>
 class SafePointer {
 public:
+	SafePointer() = default;
 	explicit SafePointer(T* raw_ptr, bool is_user):
 		m_ptr(raw_ptr), m_is_user(is_user) {}
 	template<typename C> SafePointer(const SafePointer<C>& safe_ptr):
@@ -22,6 +23,7 @@ public:
 	 * @param index An optional index into this pointer as an array.
 	 * @return The value copied from userspace at the specified index.
 	 */
+	// TODO: This is gonna have to be a result. Right now, if we fail this check, we send SIGSEGV but since we're probably in a syscall, nothing will happen yet.
 	inline T get(int index = 0) const {
 		return checked<T>(false, index, 1, [&]() {
 			return m_ptr[index];
@@ -32,6 +34,7 @@ public:
 	 * Sets the value pointed to by this pointer in user memory.
 	 * @param index An index into this pointer as an array.
 	 */
+	// TODO: This is gonna have to be a result. Right now, if we fail this check, we send SIGSEGV but since we're probably in a syscall, nothing will happen yet.
 	inline void set(int index, const T& value) const {
 		checked<void>(true, index, 1, [&]() {
 			m_ptr[index] = value;
@@ -42,6 +45,7 @@ public:
 	 * Sets the value pointed to by this pointer to the given value.
 	 * @param value The value to set.
 	 */
+	// TODO: This is gonna have to be a result. Right now, if we fail this check, we send SIGSEGV but since we're probably in a syscall, nothing will happen yet.
 	inline void set(const T& value) const {
 		set(0, value);
 	}
@@ -50,6 +54,7 @@ public:
 	 * Casts this pointer to a char pointer, and then safely makes a string from it.
 	 * @return A string made from the C string that this pointer points to.
 	 */
+	// TODO: This is gonna have to be a result. Right now, if we fail this check, we send SIGSEGV but since we're probably in a syscall, nothing will happen yet.
 	kstd::string str() const {
 		// If this is a kernel pointer, don't check
 		if(!m_is_user)
@@ -85,10 +90,31 @@ public:
 
 	/**
 	 * Performs a memcpy with this pointer as the source.
+	 * @param dest The safe destination buffer.
+	 * @param offset The offset (in sizeof(T)) to start reading at.
+	 * @param count The number of T elements to copy to the destination buffer.
+	 */
+	void read(SafePointer dest, size_t offset, size_t count) const {
+		checked<void>(false, offset, count, [&]() {
+			dest.write(m_ptr + offset, count);
+		});
+	}
+
+	/**
+	 * Performs a memcpy with this pointer as the source.
 	 * @param dest The destination buffer.
 	 * @param count The number of T elements to copy to the destination buffer.
 	 */
 	inline void read(T* dest, size_t count) const {
+		read(dest, 0, count);
+	}
+
+	/**
+	 * Performs a memcpy with this pointer as the source.
+	 * @param dest The safe destination buffer.
+	 * @param count The number of T elements to copy to the destination buffer.
+	 */
+	void read(SafePointer dest, size_t count) const {
 		read(dest, 0, count);
 	}
 
@@ -107,9 +133,30 @@ public:
 	/**
 	 * Performs a memcpy with this pointer as the destination.
 	 * @param source The source buffer.
+	 * @param offset The offset (in sizeof(T)) to start writing at.
+	 * @param count The number of T elements to copy from the destination buffer.
+	 */
+	void write(SafePointer source, size_t offset, size_t count) const {
+		checked<void>(true, offset, count, [&]() {
+			source.read(m_ptr + offset, count);
+		});
+	}
+
+	/**
+	 * Performs a memcpy with this pointer as the destination.
+	 * @param source The source buffer.
 	 * @param count The number of T elements to copy from the destination buffer.
 	 */
 	inline void write(const T* source, size_t count) const {
+		write(source, 0, count);
+	}
+
+	/**
+	 * Performs a memcpy with this pointer as the destination.
+	 * @param source The source buffer.
+	 * @param count The number of T elements to copy from the destination buffer.
+	 */
+	void write(SafePointer source, size_t count) const {
 		write(source, 0, count);
 	}
 
@@ -153,9 +200,22 @@ public:
 		});
 	}
 
+	template<typename R>
+	SafePointer<R> as() {
+		return SafePointer<R>((R*) m_ptr, m_is_user);
+	}
+
+	SafePointer operator+(ssize_t offset) const {
+		return SafePointer(m_ptr + offset, m_is_user);
+	}
+
+	SafePointer offset(ssize_t offset) const {
+		return operator+(offset);
+	}
+
 private:
-	T* const m_ptr;
-	const bool m_is_user;
+	T* m_ptr = nullptr;
+	bool m_is_user = false;
 };
 
 template<typename T>

@@ -53,7 +53,7 @@ Ext2Inode::Ext2Inode(Ext2Filesystem& filesystem, ino_t i, const Raw &raw, kstd::
 		entries.push_back(DirectoryEntry(parent, TYPE_DIR, "..")); //Parent increases their hardlink count in add_entry
 		Result res = write_directory_entries(entries);
 		if(res.is_error())
-			KLog::err("ext2", "Error %d writing new ext2 directory inode's entries to disk", res.code());
+			KLog::err("ext2", "Error {} writing new ext2 directory inode's entries to disk", res.code());
 	}
 	write_to_disk();
 }
@@ -229,33 +229,30 @@ ssize_t Ext2Inode::write(size_t start, size_t length, SafePointer<uint8_t> buf, 
 	return length;
 }
 
-ssize_t Ext2Inode::read_dir_entry(size_t start, SafePointer<DirectoryEntry> buffer, FileDescriptor* fd) {
+void Ext2Inode::iterate_entries(kstd::IterationFunc<const DirectoryEntry&> callback) {
 	LOCK(lock);
-
 	uint8_t buf[ext2fs().block_size()];
-	size_t block = start / ext2fs().block_size();
-	size_t start_in_block = start % ext2fs().block_size();
-	if(read(block * ext2fs().block_size(), ext2fs().block_size(), KernelPointer<uint8_t>(buf), fd) == 0) {
-		return 0;
+	size_t block = 0;
+	while (read(block * ext2fs().block_size(), ext2fs().block_size(), KernelPointer<uint8_t>(buf), nullptr)) {
+		size_t i = 0;
+		while((i < ext2fs().block_size()) && (block * ext2fs().block_size() + i < _metadata.size)) {
+			auto* dir = (ext2_directory*)(buf + i);
+
+			size_t name_length = dir->name_length;
+			if(name_length > NAME_MAXLEN - 1)
+				name_length = NAME_MAXLEN - 1;
+
+			DirectoryEntry result;
+			result.name_length = name_length;
+			result.id = dir->inode;
+			result.type = dir->type;
+			memcpy(result.name, &dir->type + 1, name_length);
+			ITER_RET(callback(result));
+
+			i += dir->size;
+		}
+		block++;
 	}
-	auto* dir = (ext2_directory*)(buf + start_in_block);
-
-	size_t name_length = dir->name_length;
-	if(name_length > NAME_MAXLEN - 1) name_length = NAME_MAXLEN - 1;
-
-	if(dir->inode == 0) {
-		return 0;
-	}
-
-	DirectoryEntry result;
-	result.name_length = name_length;
-	result.id = dir->inode;
-	result.type = dir->type;
-	buffer.set(result);
-	SafePointer<uint8_t> name_ptr((uint8_t*) buffer.raw()->name, buffer.is_user());
-	name_ptr.write(&dir->type+1, name_length);
-
-	return dir->size;
 }
 
 ino_t Ext2Inode::find_id(const kstd::string& find_name) {
@@ -293,16 +290,17 @@ Result Ext2Inode::add_entry(const kstd::string &name, Inode &inode) {
 
 	//Read entries into a vector
 	kstd::vector<DirectoryEntry> entries;
-	size_t offset = 0;
-	ssize_t nread;
-	DirectoryEntry buf;
-	while((nread = read_dir_entry(offset, KernelPointer<DirectoryEntry>(&buf), nullptr))) {
-		offset += nread;
-		buf.name[buf.name_length] = '\0';
-		if(name == buf.name)
-			return Result(-EEXIST);
-		entries.push_back(buf);
-	}
+	bool exist = false;
+	iterate_entries([&] (const DirectoryEntry& dirent) -> kstd::IterationAction {
+		entries.push_back(dirent);
+		if(name == dirent.name) {
+			exist = true;
+			return kstd::IterationAction::Break;
+		}
+		return kstd::IterationAction::Continue;
+	});
+	if (exist)
+		return Result(-EEXIST);
 
 	//Determine filetype
 	uint8_t type = EXT2_FT_UNKNOWN;
@@ -348,7 +346,8 @@ ResultRet<kstd::Arc<Inode>> Ext2Inode::create_entry(const kstd::string& name, mo
 	if(entry_result.is_error()) {
 		auto free_or_err = ext2fs().free_inode(*inode_or_err.value());
 		if(free_or_err.is_error()) {
-			KLog::err("ext2", "Error freeing inode %d after entry creation error! (%d)\n", inode_or_err.value()->id, free_or_err.code());
+			KLog::err("ext2", "Error freeing inode {} after entry creation error! ({})\n", inode_or_err.value()->id,
+					   free_or_err.code());
 		}
 		return entry_result;
 	}
@@ -364,28 +363,24 @@ Result Ext2Inode::remove_entry(const kstd::string &name) {
 
 	//Read entries into vector and find the child we need
 	kstd::vector<DirectoryEntry> entries;
-	size_t offset = 0;
-	ssize_t nread;
-	size_t entry_index;
+	int entry_index = 0;
 	bool found = false;
-	size_t i = 0;
-	DirectoryEntry buf;
-	while((nread = read_dir_entry(offset, KernelPointer<DirectoryEntry>(&buf), nullptr))) {
-		offset += nread;
-		buf.name[buf.name_length] = '\0';
-		if(name == buf.name) {
+	int i = 0;
+	iterate_entries([&] (const DirectoryEntry& dirent) -> kstd::IterationAction {
+		entries.push_back(dirent);
+		if (name == dirent.name) {
 			entry_index = i;
 			found = true;
 		}
-		entries.push_back(buf);
 		i++;
-	}
+		return kstd::IterationAction::Continue;
+	});
 
 	//If we didn't find it or the inode doesn't exist for some reason, return with an error
 	if(!found) return Result(-ENOENT);
 	auto child_or_err = ext2fs().get_inode(entries[entry_index].id);
 	if(child_or_err.is_error()){
-		KLog::warn("ext2", "Orphaned directory entry in inode %d", id);
+		KLog::warn("ext2", "Orphaned directory entry in inode {}", id);
 		return child_or_err.result();
 	}
 
@@ -762,18 +757,11 @@ Result Ext2Inode::try_remove_dir() {
 
 	LOCK(lock);
 
-	DirectoryEntry buf;
-	ssize_t nread;
-	size_t offset = 0;
-	size_t num_entries = 0;
 	kstd::vector<DirectoryEntry> entries;
-	while((nread = read_dir_entry(offset, KernelPointer<DirectoryEntry>(&buf), nullptr))) {
-		if(num_entries >= 2)
-			return Result(-ENOTEMPTY);
-		offset += nread;
-		num_entries++;
-		entries.push_back(buf);
-	}
+	iterate_entries([&] (const DirectoryEntry& dirent) -> kstd::IterationAction {
+		entries.push_back(dirent);
+		return kstd::IterationAction::Continue;
+	});
 
 	for(size_t i = 0; i < 2; i++) {
 		DirectoryEntry& ent = entries[i];

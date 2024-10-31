@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <libui/widget/MenuWidget.h>
+#include <fcntl.h>
 
 static const uint32_t color_palette[] = {
 		0x99000000,
@@ -184,12 +185,12 @@ Duck::Ptr<UI::Menu> TerminalWidget::create_menu() {
 			term->clear();
 		}),
 		UI::MenuItem::Separator,
-		UI::MenuItem::make("Signals", nullptr, UI::Menu::make({
+		UI::MenuItem::make("Signals", UI::Menu::make({
 			 UI::MenuItem::make("Send SIGINT (^C)", [&] {
 				 term->handle_keypress(0, 'c', KBD_MOD_CTRL);
 			 })
 		})),
-		UI::MenuItem::make("Cursor Style", nullptr, UI::Menu::make({
+		UI::MenuItem::make("Cursor Style", UI::Menu::make({
 		   UI::MenuItem::make("Block", [&] {
 			   set_cursor_style(CursorStyle::Block);
 		   }),
@@ -201,7 +202,7 @@ Duck::Ptr<UI::Menu> TerminalWidget::create_menu() {
 		   })
 		}))
 	};
-	return UI::Menu::make(items);
+	return UI::Menu::make(std::move(items));
 }
 
 void TerminalWidget::set_cursor_style(CursorStyle style) {
@@ -258,9 +259,9 @@ void TerminalWidget::run(const char* command) {
 			exit(errno);
 		}
 
-		//Set the pgid appropriately
-		if(setpgid(pid, pid) < 0) {
-			perror("setpgid");
+		//Set the sid appropriately
+		if(setsid() < 0) {
+			perror("setsid");
 			exit(errno);
 		}
 

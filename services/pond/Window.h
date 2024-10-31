@@ -51,6 +51,7 @@ public:
 	~Window();
 
 	Window* parent() const;
+	Window* menu_parent() const;
 	void reparent(Window* new_parent);
 	void remove_child(Window* child);
 	Client* client() const;
@@ -73,6 +74,11 @@ public:
 	 * The rect of the window relative to the entire screen, including the shadow.
 	 */
 	Gfx::Rect absolute_shadow_rect() const;
+
+	/**
+	 * The absolute rect of the window before its pending resize, or empty if there is no pending resize
+	 */
+	Gfx::Rect old_absolute_shadow_rect() const;
 
 	/**
 	 * Sets the rect of the window to the rect given, constrained to fit inside the parent.
@@ -227,10 +233,9 @@ public:
 	Gfx::Rect calculate_absolute_rect(const Gfx::Rect& rect);
 
 	/**
-	 * Sets whether or not the framebuffer is flipped.
-	 * @param flipped Whether or not the framebuffer has been flipped.
+	 * Flips the window's buffer.
 	 */
-	void set_flipped(bool flipped);
+	bool flip();
 
 	/**
 	 * Gets the type of the window.
@@ -280,18 +285,27 @@ public:
 	/** Gets the minimum size of the window. */
 	Gfx::Dimensions minimum_size() const { return _minimum_size; }
 
+	/** Whether the window uses alpha for hit testing. */
+	bool alpha_hit_testing() const { return _alpha_hit_testing; }
 
 private:
 	friend class Mouse;
 	void alloc_framebuffer();
+	void alloc_shadow_buffers();
 	void recalculate_rects();
+	void finalize_resize();
 
 	Gfx::Framebuffer _framebuffer = {nullptr, 0, 0};
+	bool _flipped = false;
+	bool _pending_flip = false;
 	shm _framebuffer_shm;
 	Gfx::Rect _rect;
 	Gfx::Rect _absolute_rect;
 	Gfx::Rect _absolute_shadow_rect;
+	// The old absolute rect of the window to invalidate once the window has been invalidated after a resize
+	Gfx::Rect _pending_resize_invalidation_rect = {0, 0, 0, 0};
 	Window* _parent;
+	Window* _menu_parent = nullptr;
 	Display* _display;
 	std::vector<Window*> _children;
 	Client* _client = nullptr;

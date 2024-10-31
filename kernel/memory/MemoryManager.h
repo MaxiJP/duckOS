@@ -21,14 +21,14 @@
 
 #include <kernel/kstd/types.h>
 #include <kernel/kstd/Arc.h>
-#include "PageTable.h"
-#include "PageDirectory.h"
 #include "PhysicalPage.h"
 #include "PhysicalRegion.h"
 #include "BuddyZone.h"
 #include "VMSpace.h"
-#include <kernel/tasking/SpinLock.h>
+#include <kernel/tasking/Mutex.h>
 #include "Memory.h"
+#include "kernel/arch/registers.h"
+#include <kernel/memory/PageDirectory.h>
 
 /**
  * The basic premise of how the memory allocation in duckOS is as follows:
@@ -52,13 +52,6 @@
  * often)
  */
 
-extern "C" long _KERNEL_TEXT;
-extern "C" long _KERNEL_TEXT_END;
-extern "C" long _KERNEL_DATA;
-extern "C" long _KERNEL_DATA_END;
-extern "C" long _PAGETABLES_START;
-extern "C" long _PAGETABLES_END;
-
 struct multiboot_info;
 struct multiboot_mmap_entry;
 
@@ -70,11 +63,7 @@ class MemoryManager {
 public:
 	PageDirectory kernel_page_directory { PageDirectory::DirectoryType::KERNEL };
 
-	PageDirectory::Entry kernel_page_directory_entries[1024] __attribute__((aligned(4096)));
-	PageTable::Entry kernel_early_page_table_entries1[1024] __attribute__((aligned(4096)));
-	PageTable::Entry kernel_early_page_table_entries2[1024] __attribute__((aligned(4096)));
-
-	SpinLock liballoc_spinlock;
+	static Mutex s_liballoc_lock;
 
 	MemoryManager();
 
@@ -96,7 +85,7 @@ public:
 	 * Called when the CPU encounters a page fault in the kernel.
 	 * @param r the Registers struct from the isr.
 	 */
-	void page_fault_handler(struct Registers *r);
+	void page_fault_handler(ISRRegisters* regs);
 
 	/** Gets a reference to the given physical page (indexed by page number, NOT address.) **/
 	PhysicalPage& get_physical_page(size_t page_number) const {
@@ -119,25 +108,38 @@ public:
 	kstd::Arc<VMRegion> alloc_kernel_region(size_t size);
 
 	/**
+	 * Allocates a new stack region in kernel space.
+	 * This will allocate sentinel pages on either size of the region which will trigger a fault when accessed.
+	 * @param size The minimum size, in bytes, of the new region.
+	 */
+	kstd::Arc<VMRegion> alloc_kernel_stack_region(size_t size);
+
+	/**
 	 * Allocates a new contiguous anonymous region in kernel space.
 	 * @param size The minimum size, in bytes, of the new region.
 	 */
 	kstd::Arc<VMRegion> alloc_dma_region(size_t size);
 
 	/**
-	 * Allocates a new virtual region in kernel space that is mapped to an existing range of physical pages.
+	 * Allocates a new contiguous anonymous region in kernel space.
+	 * @param size The minimum size, in bytes, of the new region.
+	 */
+	kstd::Arc<VMRegion> alloc_contiguous_kernel_region(size_t size);
+
+	/**
+	 * Allocates a new virtual region in kernel space that is mapped to an MMIO device.
 	 * @param start The start physical address to map to. Will be rounded down to a page boundary.
 	 * @param size The size (in bytes) to map to. Will be rounded up to a page boundary.
 	 * @return The newly mapped region.
 	 */
-	kstd::Arc<VMRegion> alloc_mapped_region(PhysicalAddress start, size_t size);
+	kstd::Arc<VMRegion> map_device_region(PhysicalAddress start, size_t size);
 
 	/**
 	 * Maps a VMObject into kernel space.
 	 * @param object The object to map.
 	 * @return The region the object was mapped to.
 	 */
-	kstd::Arc<VMRegion> map_object(kstd::Arc<VMObject> object);
+	kstd::Arc<VMRegion> map_object(kstd::Arc<VMObject> object, VirtualRange range = {0, 0});
 
 	/**
 	 * Temporarily maps a physical page into memory and calls a function with it mapped.
@@ -146,13 +148,19 @@ public:
 	 */
 	template<typename F>
 	void with_quickmapped(PageIndex page, F&& callback) {
-		LOCK(m_quickmap_lock);
-		ASSERT(!m_is_quickmapping);
-		m_is_quickmapping = true;
-		kernel_page_directory.map_page(KERNEL_QUICKMAP_PAGE_A / PAGE_SIZE, page, VMProt::RW);
-		callback((void*) KERNEL_QUICKMAP_PAGE_A);
-		kernel_page_directory.unmap_page(KERNEL_QUICKMAP_PAGE_A / PAGE_SIZE);
-		m_is_quickmapping = false;
+		size_t page_idx = -1;
+		for (int i = 0; i < MAX_QUICKMAP_PAGES; i++) {
+			bool expected = false;
+			if (m_quickmap_page[i].compare_exchange_strong(expected, true, MemoryOrder::Acquire)) {
+				page_idx = i;
+				break;
+			}
+		}
+		ASSERT(page_idx != -1);
+		kernel_page_directory.map_page((KERNEL_QUICKMAP_PAGES / PAGE_SIZE) + page_idx, page, VMProt::RW);
+		callback((void*) (KERNEL_QUICKMAP_PAGES + page_idx * PAGE_SIZE));
+		kernel_page_directory.unmap_page((KERNEL_QUICKMAP_PAGES / PAGE_SIZE) + page_idx);
+		m_quickmap_page[page_idx].store(false, MemoryOrder::Release);
 	}
 
 	/**
@@ -163,15 +171,28 @@ public:
 	 */
 	template<typename F>
 	void with_dual_quickmapped(PageIndex page_a, PageIndex page_b, F&& callback) {
-		LOCK(m_quickmap_lock);
-		ASSERT(!m_is_quickmapping);
-		m_is_quickmapping = true;
-		kernel_page_directory.map_page(KERNEL_QUICKMAP_PAGE_A / PAGE_SIZE, page_a, VMProt::RW);
-		kernel_page_directory.map_page(KERNEL_QUICKMAP_PAGE_B / PAGE_SIZE, page_b, VMProt::RW);
-		callback((void*) KERNEL_QUICKMAP_PAGE_A, (void*) KERNEL_QUICKMAP_PAGE_B);
-		kernel_page_directory.unmap_page(KERNEL_QUICKMAP_PAGE_A / PAGE_SIZE);
-		kernel_page_directory.unmap_page(KERNEL_QUICKMAP_PAGE_B / PAGE_SIZE);
-		m_is_quickmapping = false;
+		size_t page_idx_a = -1, page_idx_b = -1;
+		for (int i = 0; i < MAX_QUICKMAP_PAGES; i++) {
+			bool expected = false;
+			if (m_quickmap_page[i].compare_exchange_strong(expected, true, MemoryOrder::Acquire)) {
+				if (page_idx_a == -1) {
+					page_idx_a = i;
+				} else {
+					page_idx_b = i;
+					break;
+				}
+			}
+		}
+		ASSERT((page_idx_a != -1) && (page_idx_b != -1));
+		auto page_a_idx = (KERNEL_QUICKMAP_PAGES / PAGE_SIZE) + page_idx_a;
+		auto page_b_idx = (KERNEL_QUICKMAP_PAGES / PAGE_SIZE) + page_idx_b;
+		kernel_page_directory.map_page(page_a_idx, page_a, VMProt::RW);
+		kernel_page_directory.map_page(page_b_idx, page_b, VMProt::RW);
+		callback((void*) (page_a_idx * PAGE_SIZE), (void*) (page_b_idx * PAGE_SIZE));
+		kernel_page_directory.unmap_page(page_a_idx);
+		kernel_page_directory.unmap_page(page_b_idx);
+		m_quickmap_page[page_idx_a].store(false, MemoryOrder::Release);
+		m_quickmap_page[page_idx_b].store(false, MemoryOrder::Release);
 	}
 
 	/** Copies the contents of one physical page to another. **/
@@ -194,9 +215,9 @@ public:
 	 void invlpg(void* vaddr);
 
 	/**
-	 * Parses the multiboot memory map.
+	 * Sets up a memory map for the hardware.
 	 */
-	void parse_mboot_memory_map(multiboot_info* header, multiboot_mmap_entry* first_entry);
+	void setup_device_memory_map();
 
 	/**
 	 * Allocates a number of new pages for the heap. `finalize_heap_pages` MUST be called afterwards to release the lock
@@ -211,6 +232,9 @@ public:
 	 */
 	void finalize_heap_pages();
 
+	// Whether paging is set up yet.
+	[[nodiscard]] bool is_paging_setup() const;
+
 	// Various usage statistics
 	size_t usable_mem() const;
 	size_t used_pmem() const;
@@ -224,6 +248,13 @@ private:
 
 	static MemoryManager* _inst;
 
+	size_t usable_bytes_ram = 0;
+	size_t total_bytes_ram = 0;
+	size_t reserved_bytes_ram = 0;
+	size_t bad_bytes_ram = 0;
+	size_t mem_lower_limit = ~0;
+	size_t mem_upper_limit = 0;
+
 	// Heap stuff
 	kstd::vector<PageIndex> m_heap_pages = kstd::vector<PageIndex>(4096);
 	size_t m_num_heap_pages;
@@ -234,8 +265,7 @@ private:
 	kstd::Arc<VMSpace> m_kernel_space;
 	kstd::Arc<VMSpace> m_heap_space;
 
-	SpinLock m_quickmap_lock;
-	bool m_is_quickmapping = false;
+	Atomic<bool> m_quickmap_page[MAX_QUICKMAP_PAGES] {};
 };
 
 void liballoc_lock();

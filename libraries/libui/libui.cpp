@@ -32,6 +32,7 @@ Pond::Context* UI::pond_context = nullptr;
 std::vector<pollfd> pollfds;
 std::map<int, Poll> polls;
 std::map<int, std::shared_ptr<Window>> windows;
+std::weak_ptr<Window> _last_focused_window;
 int cur_timeout = 0;
 std::map<int, Timer*> timers;
 int num_windows = 0;
@@ -136,6 +137,8 @@ void handle_pond_events() {
 				auto& evt = event.window_focus;
 				auto window = find_window(evt.window->id());
 				if(window) {
+					if (evt.focused && window->pond_window()->type() != Pond::MENU)
+						_last_focused_window = window;
 					window->on_focus(evt.focused);
 				}
 			}
@@ -195,6 +198,9 @@ void UI::run() {
 }
 
 void UI::update(int timeout) {
+	// Handle pending pond events
+	handle_pond_events();
+
 	//Perform needed repaints
 	for(auto window : windows) {
 		if(window.second)
@@ -216,6 +222,10 @@ void UI::update(int timeout) {
 
 bool UI::ready_to_exit() {
 	return should_exit;
+}
+
+Duck::WeakPtr<Window> UI::last_focused_window() {
+	return _last_focused_window;
 }
 
 void UI::set_timeout(std::function<void()> func, int interval) {
@@ -266,7 +276,6 @@ Duck::Ptr<const Gfx::Image> UI::icon(Duck::Path path) {
 
 void UI::__register_window(const std::shared_ptr<Window>& window, int id) {
 	windows[id] = window;
-	num_windows++;
 }
 
 void UI::__deregister_window(int id) {
@@ -274,7 +283,11 @@ void UI::__deregister_window(int id) {
 
 	//Exit if all windows are closed
 	//TODO Add a way to override this behavior
-	if(!(--num_windows)) {
-		should_exit = true;
+	for (auto& window : windows) {
+		if (window.second->pond_window()->type() == Pond::DEFAULT) {
+			should_exit = false;
+			return;
+		}
 	}
+	should_exit = true;
 }

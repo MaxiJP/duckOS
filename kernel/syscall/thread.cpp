@@ -6,12 +6,8 @@
 
 int Process::sys_threadcreate(void* (*entry_func)(void* (*)(void*), void*), void* (*thread_func)(void*), void* arg) {
 	auto thread = kstd::make_shared<Thread>(_self_ptr, TaskManager::get_new_pid(), entry_func, thread_func, arg);
-	recalculate_pmem_total();
 	insert_thread(thread);
-	{
-		CRITICAL_LOCK(TaskManager::g_tasking_lock);
-		TaskManager::queue_thread(thread);
-	}
+	TaskManager::queue_thread(thread);
 	return thread->tid();
 }
 
@@ -34,7 +30,7 @@ int Process::sys_threadjoin(tid_t tid, UserspacePointer<void*> retp) {
 	}
 	Result result = cur_thread->join(cur_thread, thread, retp);
 	if(result.is_success()) {
-		ASSERT(thread->state() == Thread::DEAD);
+		ASSERT(thread->state() == Thread::DEAD || thread->_waiting_to_die);
 		thread.reset();
 	}
 	return result.code();
@@ -42,6 +38,7 @@ int Process::sys_threadjoin(tid_t tid, UserspacePointer<void*> retp) {
 
 int Process::sys_threadexit(void* return_value) {
 	TaskManager::current_thread()->exit(return_value);
+	TaskManager::current_thread()->leave_critical(); /* Leave critical early, since we enter it in the syscall handler */
 	ASSERT(false);
 	return -1;
 }

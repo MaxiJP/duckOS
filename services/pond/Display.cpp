@@ -183,6 +183,10 @@ void Display::repaint() {
 		return;
 	gettimeofday(&paint_time, NULL);
 
+	//If we're resizing a window, always invalidate the resize rect so we don't screw up the inverted outline effect
+	if(_resize_window)
+		invalidate(_resize_rect);
+
 	auto& fb = _buffer_mode == BufferMode::Single ? _framebuffer : _root_window->framebuffer();
 
 	// Combine areas that overlap
@@ -227,8 +231,10 @@ void Display::repaint() {
 			if(window == _mouse_window || window->hidden())
 				continue;
 
+			auto window_old_rect = window->old_absolute_shadow_rect();
 			auto window_shabs = window->absolute_shadow_rect();
-			if(window_shabs.collides(area)) {
+			auto window_collision_rect = window_old_rect.empty() ? window_shabs : window_old_rect;
+			if(window_collision_rect.collides(area)) {
 				//If it does, redraw the intersection of the window in question and the invalid area
 				Gfx::Rect window_abs = window->absolute_rect();
 				Gfx::Rect overlap_abs = area.overlapping_area(window_abs);
@@ -240,6 +246,10 @@ void Display::repaint() {
 				} else {
 					fb.copy(window->framebuffer(), transformed_overlap, overlap_abs.position());
 				}
+
+				// If the client is unresponsive, dim the window
+				if (window->client()->is_unresponsive())
+					fb.fill_blitting(overlap_abs, {0, 0, 0, 180});
 
 				// Draw the shadow
 				if(window->has_shadow()) {
@@ -263,7 +273,7 @@ void Display::repaint() {
 
 	//If we're resizing a window, draw the outline
 	if(_resize_window)
-		fb.outline(_resize_rect, RGB(255, 255, 255));
+		fb.outline_inverting_checkered(_resize_rect);
 
 	//Draw the mouse.
 	fb.draw_image(_mouse_window->framebuffer(), {0, 0, _mouse_window->rect().width, _mouse_window->rect().height},
@@ -331,8 +341,12 @@ void Display::focus(Window* window) {
 	_focused_window = window;
 	if(_focused_window)
 		_focused_window->notify_focus(true);
-	if(old_focused)
-		old_focused->notify_focus(false);
+	if (old_focused) {
+		if(old_focused != _focused_window->menu_parent()) {
+			old_focused->notify_focus(false);
+		}
+	}
+
 }
 
 
@@ -381,11 +395,14 @@ void Display::create_mouse_events(int delta_x, int delta_y, int scroll, uint8_t 
 		return;
 
 	//If we have a mousedown window and released the mouse button, stop sending events to it
-	if(_mousedown_window && !(buttons & 1))
+	if(_mousedown_window && !(buttons & 1)) {
+		if(!mouse.in(_mousedown_window->absolute_rect()))
+			_mousedown_window->set_mouse_buttons(buttons);
 		_mousedown_window = nullptr;
+	}
 
 	//If we are holding the mouse down, keep sending mouse events to the window we initially clicked
-	if(_mousedown_window && !_mousedown_window->gets_global_mouse()) {
+	if(_mousedown_window && !_mousedown_window->gets_global_mouse() && !mouse.in(_mousedown_window->absolute_rect())) {
 		_mousedown_window->mouse_moved(delta, mouse - _mousedown_window->absolute_rect().position(), mouse);
 		if(prev_mouse_buttons != buttons)
 			_mousedown_window->set_mouse_buttons(buttons);
@@ -402,7 +419,7 @@ void Display::create_mouse_events(int delta_x, int delta_y, int scroll, uint8_t 
 
 		//If it's near the border, see if we can resize it
 		static bool was_near_border = false;
-		if(!_resize_window && window->resizable() && mouse.near_border(window->absolute_rect(), WINDOW_RESIZE_BORDER)) {
+		if(!_resize_window && window->resizable() && (window != _mousedown_window) && mouse.near_border(window->absolute_rect(), WINDOW_RESIZE_BORDER)) {
 			was_near_border = true;
 			_resize_mode = get_resize_mode(window->absolute_rect(), mouse);
 			switch(_resize_mode) {
@@ -440,9 +457,15 @@ void Display::create_mouse_events(int delta_x, int delta_y, int scroll, uint8_t 
 
 		//Otherwise, if it's in the window, create the appropriate events
 		if(mouse.in(window->absolute_rect())) {
+			auto window_rel_pos = mouse - window->absolute_rect().position();
+
+			// If the window uses alpha hit testing, check if the pixel the mouse is on is transparent
+			if (window->alpha_hit_testing() && (window->framebuffer().at(window_rel_pos)->a == 0))
+				continue;
+
 			event_window = window;
 			if(!window->gets_global_mouse()) {
-				window->mouse_moved(delta, mouse - window->absolute_rect().position(), mouse);
+				window->mouse_moved(delta, window_rel_pos, mouse);
 				if(prev_mouse_buttons != buttons)
 					window->set_mouse_buttons(buttons);
 				if(scroll)

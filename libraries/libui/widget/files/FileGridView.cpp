@@ -6,10 +6,11 @@
 #include "../Image.h"
 #include "../../libui.h"
 #include "../Cell.h"
+#include "../layout/FlexLayout.h"
 
 using namespace UI;
 
-class FileView: public UI::BoxLayout {
+class FileView: public UI::FlexLayout {
 public:
 	WIDGET_DEF(FileView)
 protected:
@@ -23,7 +24,7 @@ protected:
 
 private:
 	FileView(const Duck::DirectoryEntry& dir_entry, Duck::WeakPtr<FileGridView> dir_widget):
-		BoxLayout(VERTICAL), entry(dir_entry), dir_widget(std::move(dir_widget))
+		FlexLayout(VERTICAL), entry(dir_entry), dir_widget(std::move(dir_widget))
 	{
 		Duck::Ptr<const Gfx::Image> image;
 		auto path = entry.path();
@@ -34,18 +35,20 @@ private:
 		if(!image) {
 			auto app = App::app_for_file(path);
 			if(app.has_value())
-				image = app.value().icon();
+				image = app.value().icon_for_file(path);
 			else
 				image = UI::icon(entry.is_directory() ? "/filetypes/folder" : "/filetypes/default");
 		}
 
 		auto ui_image = UI::Image::make(image);
 		ui_image->set_preferred_size({32, 32});
+		ui_image->set_sizing_mode(UI::PREFERRED);
 
-		add_child(Cell::make(ui_image));
+		add_child(ui_image);
 
 		auto label = UI::Label::make(entry.name());
-		label->set_alignment(BEGINNING, CENTER);
+		label->set_alignment(CENTER, CENTER);
+		label->set_sizing_mode(UI::FILL);
 		add_child(label);
 	}
 
@@ -83,6 +86,9 @@ int FileGridView::lv_num_items() {
 
 void FileGridView::did_set_directory(Duck::Path path) {
 	if(inited) {
+		m_selected.clear();
+		if(!delegate.expired())
+			delegate.lock()->fv_did_select_files(m_selected);
 		list_view->update_data();
 		list_view->scroll_to({0, 0});
 	}

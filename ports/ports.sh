@@ -3,10 +3,16 @@
 
 PORTS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SOURCE_DIR="$PORTS_DIR/.."
-ROOT_DIR="$SOURCE_DIR/cmake-build/root"
+ROOT_DIR="$SOURCE_DIR/build/i686/root"
 PORTS_D_DIR="$ROOT_DIR/usr/ports.d"
-PATH="$PATH:$SOURCE_DIR/toolchain/tools/bin"
+PATH="$PATH:$SOURCE_DIR/toolchain/tools/i686/bin"
 NUM_JOBS=$(( $(nproc) / 2 ))
+
+SED_BIN="sed"
+if [ "$SYS_NAME" = "Darwin" ]; then
+  INSTALL_BIN="ginstall"
+  SED_BIN="gsed"
+fi
 
 export DUCKOS_PORTS_SCRIPT="${PORTS_DIR}/ports.sh"
 
@@ -21,23 +27,37 @@ export CXXFILT="i686-pc-duckos-c++filt"
 export READELF="i686-pc-duckos-readelf"
 export STRIP="$i686-pc-duckos-strip"
 export OBJCOPY="i686-pc-duckos-objcopy"
+export PKG_CONFIG_DIR=""
+export PKG_CONFIG_SYSROOT_DIR="$ROOT_DIR"
+export PKG_CONFIG_LIBDIR="$ROOT_DIR/usr/local/lib/pkgconfig"
+
+apply_config_subs() {
+  for CONFIGSUB in "${CONFIG_SUB_PATHS[@]}"; do
+    msg "Patching config.sub $CONFIGSUB"
+    "$SED_BIN" -i '/Each alternative MUST end in/a duckos\* | \\' "$CONFIGSUB" || fail "Failed to automatically patch $CONFIGSUB"
+    "$SED_BIN" -i '/sysv\* is not here because/a -duckos\* | \\' "$CONFIGSUB" || fail "Failed to automatically patch $CONFIGSUB"
+  done
+}
 
 download_extract_patch() {
   if [ ! -d "$DOWNLOAD_FILE" ]; then
     msg "Downloading $DOWNLOAD_URL"
-    curl "$DOWNLOAD_URL" > "$DOWNLOAD_FILE.tar.gz" || return 1
+    curl -L "$DOWNLOAD_URL" > "$DOWNLOAD_FILE.tar.gz" || return 1
     msg "Extracting $DOWNLOAD_FILE.tar.gz..."
     tar -xf "$DOWNLOAD_FILE.tar.gz" || return 1
     rm "$DOWNLOAD_FILE.tar.gz"
-    pushd "$DOWNLOAD_FILE"
-    if [ -n "$PATCH_FILE" ]; then
-      msg "Applying patch $PATCH_FILE..."
-      patch -p1 < "$PORT_DIR/$PATCH_FILE" > /dev/null || return 1
+    pushd "$DOWNLOAD_FILE" || return 1
+    apply_config_subs || return 1
+    if [ -n "$PATCH_FILES" ]; then
+      for PATCH in "${PATCH_FILES[@]}"; do
+        msg "Applying patch $PATCH..."
+        patch -p1 < "$PORT_DIR/$PATCH" > /dev/null || fail "Failed to apply patch!"
+      done
       success "Downloaded and patched $DOWNLOAD_FILE!"
     else
       success "Downloaded $DOWNLOAD_FILE!"
     fi
-    popd
+    popd || return 1
   else
     msg "$DOWNLOAD_FILE already downloaded!"
   fi
@@ -46,7 +66,11 @@ download_extract_patch() {
 git_clone_patch() {
   if [ ! -d ".git" ]; then
     msg "Cloning $GIT_URL"
-    git clone "$GIT_URL" .
+    git clone "$GIT_URL" . || return 1
+    if [ -n "$GIT_BRANCH" ]; then
+      git switch "$GIT_BRANCH" || return 1
+    fi
+    apply_config_subs || return 1
     if [ -n "$PATCH_FILE" ]; then
       msg "Applying patch $PATCH_FILE..."
       patch -p1 < "$PORT_DIR/$PATCH_FILE" > /dev/null || return 1
@@ -85,20 +109,29 @@ build_port() {
   export INSTALL_ARGS=("install")
   export DEPENDENCIES=()
   export GIT_URL=""
+  export CONFIGURE_PATH=""
+  export CONFIG_SUB_PATHS=()
   source "$PORT_DIR/build.sh"
 
-  install_dependencies
+  install_dependencies || return 1
 
   mkdir -p "$PORTS_DIR/build/$DUCKOS_PORT_NAME"
   pushd "$PORTS_DIR/build/$DUCKOS_PORT_NAME" || return 1
   if [ -n "$DOWNLOAD_URL" ]; then
-    download_extract_patch
+    download_extract_patch || return 1
   elif [ -n "$GIT_URL" ]; then
-    git_clone_patch
+    git_clone_patch || return 1
+  fi
+  if [[ $(type -t prebuild) == function ]]; then
+    msg "Executing prebuild steps for $DUCKOS_PORT_NAME..."
+    prebuild
   fi
   if [ "$USE_CONFIGURE" = "true" ]; then
     msg "Configuring port $DUCKOS_PORT_NAME..."
-    "$DOWNLOAD_FILE/configure" --host="i686-pc-duckos" "${CONFIGURE_ARGS[@]}" || return 1
+    if [ -z "$CONFIGURE_PATH" ]; then
+      CONFIGURE_PATH="$DOWNLOAD_FILE/configure"
+    fi
+    "$CONFIGURE_PATH" --host="i686-pc-duckos" "${CONFIGURE_ARGS[@]}" || return 1
   fi
   msg "Building port $DUCKOS_PORT_NAME..."
   make "-j$NUM_JOBS" "${MAKE_ARGS[@]}" || return 1

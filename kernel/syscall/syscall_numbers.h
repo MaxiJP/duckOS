@@ -78,6 +78,20 @@
 #define SYS_ACCESS 75
 #define SYS_MPROTECT 76
 #define SYS_UNAME 77
+#define SYS_PTRACE 78
+#define SYS_SOCKET 79
+#define SYS_BIND 80
+#define SYS_SETSOCKOPT 81
+#define SYS_GETSOCKOPT 82
+#define SYS_RECVMSG 83
+#define SYS_SENDMSG 84
+#define SYS_GETIFADDRS 85
+#define SYS_CONNECT 86
+#define SYS_LISTEN 87
+#define SYS_SHUTDOWN 88
+#define SYS_ACCEPT 89
+#define SYS_FUTEX 90
+#define SYS_YIELD 91
 
 #ifndef DUCKOS_KERNEL
 #include <sys/types.h>
@@ -88,4 +102,20 @@ struct readlinkat_args {
 	const char* path;
 	char* buf;
 	size_t bufsize;
+};
+
+struct getsockopt_args {
+	int sockfd;
+	int level;
+	int option_name;
+	void* option_value;
+	uint32_t* option_len;
+};
+
+struct setsockopt_args {
+	int sockfd;
+	int level;
+	int option_name;
+	const void* option_value;
+	uint32_t option_len;
 };

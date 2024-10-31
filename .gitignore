@@ -84,6 +84,7 @@ _deps
 
 # CMake
 cmake-build*/
+build/
 
 #
 # DUCKOS-SPECIFIC
@@ -95,3 +96,5 @@ toolchain/sysroot
 toolchain/edit
 
 user/
+compile_commands.json
+.cache/

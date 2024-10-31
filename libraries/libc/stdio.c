@@ -50,6 +50,8 @@ bool can_write(FILE* file) {
 	return file->options & O_RDWR || file->options & O_WRONLY;
 }
 
+extern FILE __stdin, __stdout, __stderr;
+
 FILE __stdin = {
 		.fd = STDIN_FILENO,
 		.options = O_RDONLY,
@@ -64,6 +66,7 @@ FILE __stdin = {
 		.next = &__stdout,
 		.prev = NULL
 };
+FILE* stdin = &__stdin;
 
 FILE __stdout = {
 		.fd = STDOUT_FILENO,
@@ -79,6 +82,7 @@ FILE __stdout = {
 		.next = &__stderr,
 		.prev = &__stdin
 };
+FILE* stdout = &__stdout;
 
 FILE __stderr = {
 		.fd = STDERR_FILENO,
@@ -94,6 +98,7 @@ FILE __stderr = {
 		.next = NULL,
 		.prev = &__stdout
 };
+FILE* stderr = &__stderr;
 
 //File stuff
 FILE* filelist_first = &__stdin;
@@ -113,6 +118,8 @@ void filelist_remove(FILE* file) {
 		file->prev->next = file->next;
 	if(file == filelist_last)
 		filelist_last = file->prev;
+	if(file == filelist_first)
+		filelist_first = file->next;
 }
 
 int remove(const char* filename) {
@@ -211,7 +218,7 @@ int parse_str_options(const char* mode) {
 				options = O_RDWR;
 				break;
 			case O_WRONLY | O_CREAT:
-				options = O_RDWR | O_CREAT;
+				options = O_RDWR | O_CREAT | O_TRUNC;
 				break;
 			case O_WRONLY | O_APPEND:
 				options = O_RDWR | O_APPEND;
@@ -244,7 +251,7 @@ FILE* fopen(const char* filename, const char* mode) {
 		return NULL;
 
 	//Make the file
-	FILE* ret = malloc(sizeof(FILE));
+	FILE* ret = calloc(sizeof(FILE), 1);
 	ret->fd = fd;
 	ret->options = options;
 	ret->ungetc = -1;
@@ -428,10 +435,8 @@ int vsnprintf(char* s, size_t n, const char* format, va_list arg) {
 //Character input/output
 int fgetc(FILE* stream) {
 	char buf[1];
-	if(fread(buf, 1, 1, stream) != 1) {
-		stream->eof = 1;
+	if(fread(buf, 1, 1, stream) != 1)
 		return EOF;
-	}
 	return (unsigned char) *buf;
 }
 
@@ -638,6 +643,10 @@ int fseek(FILE* stream, long int offset, int whence) {
 	}
 }
 
+int fseeko(FILE* stream, off_t offset, int whence) {
+	return fseek(stream, offset, whence);
+}
+
 int fsetpos(FILE* stream, const fpos_t* pos) {
 	return fseek(stream, *pos, SEEK_SET);
 }
@@ -646,6 +655,10 @@ long int ftell(FILE* stream) {
 	if(fflush(stream) < 0)
 		return -1;
 	return lseek(stream->fd, 0, SEEK_CUR);
+}
+
+off_t ftello(FILE* stream) {
+	return ftell(stream);
 }
 
 void rewind(FILE* stream) {
@@ -680,7 +693,8 @@ void __init_stdio() {
 void __cleanup_stdio() {
 	FILE* cur = filelist_first;
 	while(cur) {
+		FILE* next = cur->next;
 		fclose(cur);
-		cur = cur->next;
+		cur = next;
 	}
 }

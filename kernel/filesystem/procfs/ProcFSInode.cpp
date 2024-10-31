@@ -20,19 +20,10 @@
 #include <kernel/tasking/TaskManager.h>
 #include <kernel/CommandLine.h>
 #include <kernel/filesystem/VFS.h>
-#include <kernel/time/TimeManager.h>
 #include "ProcFSInode.h"
 #include "ProcFSEntry.h"
-#include <kernel/filesystem/Inode.h>
-#include <kernel/User.h>
 #include "ProcFS.h"
-#include <kernel/memory/MemoryManager.h>
-#include <kernel/kstd/cstring.h>
-#include <kernel/tasking/Process.h>
-#include <kernel/memory/PageDirectory.h>
-#include <kernel/device/DiskDevice.h>
-
-const char* PROC_STATE_NAMES[] = {"Running", "Zombie", "Dead", "Sleeping"};
+#include "ProcFSContent.h"
 
 ProcFSInode::ProcFSInode(ProcFS& fs, ProcFSEntry& entry): Inode(fs, entry.dir_entry.id), procfs(fs), pid(entry.pid), type(entry.type), parent(entry.parent) {
 	switch(entry.dir_entry.type) {
@@ -61,16 +52,6 @@ InodeMetadata ProcFSInode::metadata() {
 	_metadata.gid = user.gid;
 	_metadata.inode_id = id;
 	_metadata.size = 0;
-
-	if(_metadata.is_directory()) {
-		_metadata.size = PROCFS_CDIR_ENTRY_SIZE + PROCFS_PDIR_ENTRY_SIZE;
-		for (size_t i = 0; i < procfs.entries.size(); i++) {
-			auto& entry = procfs.entries[i];
-			if (entry.parent == id)
-				_metadata.size += procfs.entries[i].dir_entry.entry_length();
-		}
-	}
-
 	return _metadata;
 }
 
@@ -84,166 +65,43 @@ ino_t ProcFSInode::find_id(const kstd::string& name) {
 	return -ENOENT;
 }
 
-ssize_t ProcFSInode::read(size_t start, size_t length, SafePointer<uint8_t> buffer, FileDescriptor* fd) {
-	if(_metadata.is_directory()) return -EISDIR;
+ResultRet<kstd::string> ProcFSInode::get_string_contents() {
 	switch(type) {
-		case Root:
-		case RootProcEntry:
-			return -EISDIR;
-
-		case RootCmdLine: {
-			auto str = CommandLine::inst().get_cmdline() + "\n";
-			if(start >= str.length())
-				return 0;
-			if(start + length > str.length())
-				length = str.length() - start;
-			buffer.write((unsigned char*) str.c_str() + start, length);
-			return length;
-		}
-
-		case RootMemInfo: {
-			char numbuf[12];
-			kstd::string str;
-
-			str += "[mem]\nusable = ";
-			itoa((int) MM.usable_mem(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nused = ";
-			itoa((int) MM.used_pmem(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nreserved = ";
-			itoa((int) MM.reserved_pmem(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nkvirt = ";
-			itoa((int) MM.kernel_vmem(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nkphys = ";
-			itoa((int) MM.kernel_pmem(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nkheap = ";
-			itoa((int) MM.kernel_heap(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nkcache = ";
-			itoa((int) DiskDevice::used_cache_memory(), numbuf, 10);
-			str += numbuf;
-			str += "\n";
-
-			if(start >= str.length())
-				return 0;
-			if(start + length > str.length())
-				length = str.length() - start;
-			buffer.write((unsigned char*) str.c_str() + start, length);
-			return length;
-		}
-
-		case RootUptime: {
-			char numbuf[12];
-			itoa(TimeManager::uptime().tv_sec, numbuf, 10);
-			kstd::string str = numbuf;
-			str += "\n";
-
-			if(start >= str.length())
-				return 0;
-			if(start + length > str.length())
-				length = str.length() - start;
-			buffer.write((unsigned char*) str.c_str() + start, length);
-			return length;
-		}
-
-		case RootCpuInfo: {
-			char numbuf[4];
-			double percent_used = (1.00 - TimeManager::percent_idle()) * 100.0;
-
-			kstd::string str = "[cpu]\nutil = ";
-
-			itoa((int) percent_used, numbuf, 10);
-			str += numbuf;
-			str += ".";
-
-			percent_used -= (int) percent_used;
-			if(percent_used == 0)
-				str += "0";
-			int num_decimals = 0;
-			while(percent_used > 0 && num_decimals < 3) {
-				percent_used *= 10;
-				itoa((int)percent_used, numbuf, 10);
-				str += numbuf;
-				percent_used -= (int) percent_used;
-				num_decimals++;
-			}
-
-			if(start >= str.length())
-				return 0;
-			if(start + length > str.length())
-				length = str.length() - start;
-			buffer.write((unsigned char*) str.c_str() + start, length);
-			return length;
-		}
-
-		case ProcStatus: {
-			auto proc = TaskManager::process_for_pid(pid);
-			if(proc.is_error())
-				return -EIO;
-
-			char numbuf[12];
-			kstd::string str;
-
-			str += "[proc]\nname = ";
-			str += proc.value()->name();
-
-			str += "\nstate = ";
-			itoa(proc.value()->all_threads_state(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nstate_name = ";
-			str += PROC_STATE_NAMES[proc.value()->all_threads_state()];
-
-			str += "\npid = ";
-			itoa(proc.value()->pid(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nppid = ";
-			itoa(proc.value()->ppid(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nuid = ";
-			itoa(proc.value()->user().euid, numbuf, 10);
-			str += numbuf;
-
-			str += "\ngid = ";
-			itoa(proc.value()->user().egid, numbuf, 10);
-			str += numbuf;
-
-			str += "\npmem = ";
-			itoa(proc.value()->used_pmem(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nvmem = ";
-			itoa(proc.value()->used_vmem(), numbuf, 10);
-			str += numbuf;
-
-			str += "\nshmem = ";
-			itoa(proc.value()->used_shmem(), numbuf, 10);
-			str += numbuf;
-			str += "\n";
-
-			if(start >= str.length())
-				return 0;
-			if(start + length > str.length())
-				length = str.length() - start;
-			buffer.write((unsigned char*) str.c_str() + start, length);
-			return length;
-		}
-
+		case RootCmdLine:
+			return CommandLine::inst().get_cmdline() + "\n";
+		case RootMemInfo:
+			return ProcFSContent::mem_info();
+		case RootUptime:
+			return ProcFSContent::uptime();
+		case RootCpuInfo:
+			return ProcFSContent::cpu_info();
+		case RootLockInfo:
+			return ProcFSContent::lock_info();
+		case ProcStatus:
+			return ProcFSContent::status(pid);
+		case ProcStacks:
+			return ProcFSContent::stacks(pid);
+		case ProcVMSpace:
+			return ProcFSContent::vmspace(pid);
 		default:
-			return -EIO;
+			return Result(-EINVAL);
 	}
+}
+
+ssize_t ProcFSInode::read(size_t start, size_t length, SafePointer<uint8_t> buffer, FileDescriptor* fd) {
+	if(_metadata.is_directory())
+		return -EISDIR;
+
+	auto string_res = get_string_contents();
+	if (string_res.is_error())
+		return string_res.code();
+
+	if(start >= string_res.value().length())
+		return 0;
+	if(start + length > string_res.value().length())
+		length = string_res.value().length() - start;
+	buffer.write((unsigned char*) string_res.value().c_str() + start, length);
+	return length;
 }
 
 ResultRet<kstd::Arc<LinkedInode>> ProcFSInode::resolve_link(const kstd::Arc<LinkedInode>& base, const User& user, kstd::Arc<LinkedInode>* parent_storage, int options, int recursion_level) {
@@ -269,32 +127,15 @@ ResultRet<kstd::Arc<LinkedInode>> ProcFSInode::resolve_link(const kstd::Arc<Link
 	return VFS::inst().resolve_path(loc, base, user, parent_storage, options, recursion_level);
 }
 
-ssize_t ProcFSInode::read_dir_entry(size_t start, SafePointer<DirectoryEntry> buffer, FileDescriptor* fd) {
-	if(!_metadata.is_directory()) return -ENOTDIR;
+void ProcFSInode::iterate_entries(kstd::IterationFunc<const DirectoryEntry&> callback) {
 	LOCK(procfs.lock);
-
-	if(start == 0) {
-		DirectoryEntry ent(id, TYPE_DIR, ".");
-		buffer.set(ent);
-		return PROCFS_CDIR_ENTRY_SIZE;
-	} else if(start == PROCFS_CDIR_ENTRY_SIZE) {
-		DirectoryEntry ent(parent, TYPE_DIR, "..");
-		buffer.set(ent);
-		return PROCFS_PDIR_ENTRY_SIZE;
+	ITER_RET(callback(DirectoryEntry(id, TYPE_DIR, ".")));
+	ITER_RET(callback(DirectoryEntry(parent, TYPE_DIR, "..")));
+	for(auto& entry : procfs.entries) {
+		if (entry.parent != id)
+			continue;
+		ITER_BREAK(callback(entry.dir_entry));
 	}
-
-	size_t cur_index = PROCFS_CDIR_ENTRY_SIZE + PROCFS_PDIR_ENTRY_SIZE;
-	for(size_t i = 0; i < procfs.entries.size(); i++) {
-		auto& e = procfs.entries[i];
-		if(e.parent == id) {
-			if(cur_index >= start) {
-				buffer.set(e.dir_entry);
-				return e.dir_entry.entry_length();
-			}
-			cur_index += e.dir_entry.entry_length();
-		}
-	}
-	return 0;
 }
 
 ssize_t ProcFSInode::write(size_t start, size_t length, SafePointer<uint8_t> buf, FileDescriptor* fd) {

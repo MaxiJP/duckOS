@@ -31,7 +31,22 @@ namespace Sys {
 			ALIVE = 0,
 			ZOMBIE = 1,
 			DEAD = 2,
-			BLOCKED = 3
+			BLOCKED = 3,
+			STOPPED = 4
+		};
+
+		struct MemoryRegion {
+			size_t start;
+			Mem::Amount size;
+			size_t object_start;
+			struct Prot {
+				bool read, write, execute;
+			} prot;
+			enum Type {
+				Anonymous, Inode
+			} type;
+			bool shared;
+			std::string name;
 		};
 
 		static std::map<pid_t, Process> get_all();
@@ -49,6 +64,8 @@ namespace Sys {
 		Mem::Amount physical_mem() const { return _physical_mem; }
 		Mem::Amount virtual_mem() const { return _virtual_mem; }
 		Mem::Amount shared_mem() const { return _shared_mem; }
+		const std::vector<tid_t>& threads() const { return _threads; }
+		Duck::ResultRet<std::vector<MemoryRegion>> memory_regions() const;
 
 		Duck::ResultRet<App::Info> app_info() const;
 
@@ -64,6 +81,7 @@ namespace Sys {
 		Mem::Amount _physical_mem;
 		Mem::Amount _virtual_mem;
 		Mem::Amount _shared_mem;
+		std::vector<tid_t> _threads;
 	};
 }
 

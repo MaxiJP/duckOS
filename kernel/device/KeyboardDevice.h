@@ -19,10 +19,10 @@
 
 #pragma once
 
-#include "CharacterDevice.h"
-#include <kernel/keyboard.h>
-#include <kernel/kstd/circular_queue.hpp>
-#include <kernel/interrupt/IRQHandler.h>
+#include "kernel/device/CharacterDevice.h"
+#include "kernel/keyboard.h"
+#include "kernel/kstd/circular_queue.hpp"
+#include "kernel/interrupt/IRQHandler.h"
 
 class KeyEvent {
 public:
@@ -52,7 +52,7 @@ public:
 
 	//IRQHandler
 	void set_handler(KeyboardHandler* handler);
-	void handle_irq(Registers* regs) override;
+	void handle_irq(IRQRegisters* regs) override;
 
 	//I8042
 	void handle_byte(uint8_t byte);

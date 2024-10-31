@@ -59,7 +59,7 @@ kstd::Arc<VMSpace> VMSpace::fork(PageDirectory& page_directory, kstd::vector<kst
 					auto new_object_res = region->object()->clone();
 					m_page_directory.map(*region);
 					if(new_object_res.is_error()) {
-						KLog::err("VMSpace", "Could not clone a VMObject: %d!", new_object_res.code());
+						KLog::err("VMSpace", "Could not clone a VMObject: {}!", new_object_res.code());
 						break;
 					}
 					new_object = new_object_res.value();
@@ -107,8 +107,22 @@ ResultRet<kstd::Arc<VMRegion>> VMSpace::map_object(kstd::Arc<VMObject> object, V
 	auto vmRegion = kstd::make_shared<VMRegion>(
 			object,
 			self(),
-			VirtualRange {region->start, object->size()},
+			VirtualRange {region->start, range.size},
 			object_start,
+			prot);
+	region->vmRegion = vmRegion.get();
+	m_page_directory.map(*vmRegion);
+	return vmRegion;
+}
+
+ResultRet<kstd::Arc<VMRegion>> VMSpace::map_object_with_sentinel(kstd::Arc<VMObject> object, VMProt prot) {
+	// Create and map the region
+	VMSpaceRegion* region = TRY(alloc_space(object->size() + PAGE_SIZE * 2));
+	auto vmRegion = kstd::make_shared<VMRegion>(
+			object,
+			self(),
+			VirtualRange {region->start + PAGE_SIZE, object->size()},
+			0,
 			prot);
 	region->vmRegion = vmRegion.get();
 	m_page_directory.map(*vmRegion);
@@ -215,6 +229,10 @@ Result VMSpace::try_pagefault(PageFault fault) {
 			if(!vmRegion)
 				return Result(EINVAL);
 
+			// If this region has a sentinel page, then we might be within the VMSpaceRegion but not the vmRegion.
+			if (!vmRegion->contains(fault.address))
+				return Result(ENOENT);
+
 			// First, sanity check. If the region doesn't have the proper permissions, we can just fail here.
 			auto prot = vmRegion->prot();
 			if(
@@ -226,65 +244,31 @@ Result VMSpace::try_pagefault(PageFault fault) {
 			}
 
 			PageIndex error_page = (fault.address - vmRegion->start()) / PAGE_SIZE;
+			PageIndex object_page = error_page + (vmRegion->object_start() / PAGE_SIZE);
+			auto object = vmRegion->object();
 
-			// Check if the region is a mapped inode.
-			if(vmRegion->object()->is_inode()) {
-				auto inode_object = kstd::static_pointer_cast<InodeVMObject>(vmRegion->object());
-
-				// Check to see if it needs to be read in
-				LOCK_N(inode_object->lock(), inode_locker);
-				if(inode_object->physical_page_index(error_page)) {
-					// This page may be marked CoW, so copy it if it is
-					if(vmRegion->prot().write && inode_object->page_is_cow(error_page)) {
-						auto res = vmRegion->m_object->try_cow_page(error_page);
-						if(res.is_error())
-							return res;
-					}
-
-					// Or, we may have encountered a race where the page was created by another thread after the fault.
-					m_page_directory.map(*vmRegion, VirtualRange { error_page * PAGE_SIZE, PAGE_SIZE });
-					return Result(SUCCESS);
+			// Check to see if it needs to be read in
+			LOCK_N(object->lock(), object_locker);
+			if(object->physical_page_index(object_page)) {
+				// This page may be marked CoW, so copy it if it is
+				if(vmRegion->prot().write && object->page_is_cow(object_page)) {
+					auto res = vmRegion->m_object->try_cow_page(object_page);
+					if(res.is_error())
+						return res;
 				}
 
-				// Allocate a new physical page.
-				auto new_page = TRY(MM.alloc_physical_page());
-
-				// We read directly from the shared VMObject if this page exists in it.
-				auto inode = inode_object->inode();
-				auto shared_object = inode->shared_vm_object();
-				PageIndex shared_page_index = error_page + (vmRegion->object_start() / PAGE_SIZE);
-				auto shared_page = shared_object->physical_page_index(shared_page_index);
-				if(shared_object != inode_object && shared_page) {
-					MM.copy_page(shared_page, new_page);
-				} else {
-					// Read the appropriate part of the file into the buffer.
-					kstd::Arc<uint8_t> buf((uint8_t*) kmalloc(PAGE_SIZE));
-					ssize_t nread = inode->read(error_page * PAGE_SIZE + vmRegion->object_start(), PAGE_SIZE, KernelPointer<uint8_t>(buf.get()), nullptr);
-					if(nread < 0)
-						return Result(-nread);
-
-					// Read the contents of the buffer into the newly allocated physical page.
-					MM.with_quickmapped(new_page, [&](void* page_buf) {
-						memcpy_uint32((uint32_t*) page_buf, (uint32_t*) buf.get(), PAGE_SIZE / sizeof(uint32_t));
-					});
-				}
-
-				// Remap the page.
-				inode_object->physical_page_index(error_page) = new_page;
-				m_page_directory.map(*vmRegion, VirtualRange { error_page * PAGE_SIZE, PAGE_SIZE });
-
+				// Or, we may have encountered a race where the page was created by another thread after the fault.
+				m_page_directory.map(*vmRegion, VirtualRange { object_page * PAGE_SIZE, PAGE_SIZE });
 				return Result(SUCCESS);
 			}
 
-			// CoW if the region is writeable.
-			if(vmRegion->prot().write) {
-				auto result = vmRegion->m_object->try_cow_page(error_page);
-				if(result.is_success())
-					m_page_directory.map(*vmRegion, VirtualRange { error_page * PAGE_SIZE, PAGE_SIZE });
-				return result;
-			}
+			// Otherwise, read in the page and map it
+			auto did_read = TRY(object->try_fault_in_page(object_page));
+			ASSERT(object->physical_page_index(object_page));
+			if(did_read)
+				m_page_directory.map(*vmRegion, VirtualRange { error_page * PAGE_SIZE, PAGE_SIZE });
 
-			return Result(EINVAL);
+			return Result(SUCCESS);
 		}
 		cur_region = cur_region->next;
 	}
@@ -305,20 +289,26 @@ ResultRet<VirtualAddress> VMSpace::find_free_space(size_t size) {
 
 size_t VMSpace::calculate_regular_anonymous_total() {
 	LOCK(m_lock);
-	size_t total = 0;
+	size_t total_pages = 0;
 	auto cur_region = m_region_map;
 	while(cur_region) {
 		if(cur_region->used) {
-			auto& object = cur_region->vmRegion->m_object;
-			if(object->is_anonymous()) {
-				auto anon_object = kstd::static_pointer_cast<AnonymousVMObject>(object);
-				if(!anon_object->is_shared())
-					total += anon_object->size();
-			}
+			auto object = cur_region->vmRegion->m_object;
+			total_pages += object->num_committed_pages();
 		}
 		cur_region = cur_region->next;
 	}
-	return total;
+	return total_pages * PAGE_SIZE;
+}
+
+void VMSpace::iterate_regions(kstd::IterationFunc<VMRegion*> callback) {
+	LOCK(m_lock);
+	auto cur_region = m_region_map;
+	while(cur_region) {
+		if(cur_region->used)
+			ITER_BREAK(callback(cur_region->vmRegion));
+		cur_region = cur_region->next;
+	}
 }
 
 ResultRet<VMSpace::VMSpaceRegion*> VMSpace::alloc_space(size_t size) {

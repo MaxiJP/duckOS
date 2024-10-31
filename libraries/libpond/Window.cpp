@@ -33,13 +33,11 @@ void Window::destroy() {
 }
 
 void Window::invalidate() {
-	flip_buffer();
-	_context->__river_invalidate_window({_id, {-1, -1, -1, -1}, _flipped});
+	_flipped = _context->__river_invalidate_window({_id, {-1, -1, -1, -1}});
 }
 
 void Window::invalidate_area(Gfx::Rect area) {
-	flip_buffer();
-	_context->__river_invalidate_window({_id, area, _flipped});
+	_flipped = _context->__river_invalidate_window({_id, area});
 }
 
 void Window::resize(Gfx::Dimensions dims) {
@@ -107,6 +105,10 @@ void Window::set_uses_alpha(bool alpha_blending) {
 	_context->__river_set_hint({_id, PWINDOW_HINT_USEALPHA, alpha_blending});
 }
 
+void Window::set_uses_alpha_hit_testing(bool alpha_hit_testing) {
+	_context->__river_set_hint({_id, PWINDOW_HINT_ALPHA_HITTEST, alpha_hit_testing});
+}
+
 int Window::id() const {
 	return _id;
 }
@@ -121,10 +123,6 @@ unsigned int Window::mouse_buttons() const {
 
 Gfx::Point Window::mouse_pos() const {
 	return _mouse_pos;
-}
-
-void Window::flip_buffer() {
-	_flipped = !_flipped;
 }
 
 WindowType Window::type() const {

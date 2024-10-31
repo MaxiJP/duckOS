@@ -32,7 +32,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: toolchain/tools
-          key: ${{ runner.os }}-toolchain-${{ hashFiles('toolchain/*.patch') }}
+          key: ${{ runner.os }}-toolchain-${{ hashFiles('toolchain/*.patch') }}-${{ hashFiles('toolchain/*.sh') }}
       
       - name: Build toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
@@ -45,21 +45,22 @@ jobs:
         run: |
           cd toolchain
           ./build-toolchain.sh install-headers
+          ./build-toolchain.sh make-toolchain-file
       
       - name: Build duckOS (Release)
         run: |
-          cd cmake-build
-          cmake .. -DCMAKE_TOOLCHAIN_FILE=toolchain/CMakeToolchain.txt -DCMAKE_BUILD_TYPE=Release
+          cd build/i686
+          cmake ../.. -DCMAKE_TOOLCHAIN_FILE=build/i686/CMakeToolchain.txt -DCMAKE_BUILD_TYPE=Release
           make install
           
       - name: Make image
         run: |
-          cd cmake-build
+          cd build/i686
           make image
           
       - name: Upload image
         uses: actions/upload-artifact@v3
         with:
           name: Disk Image
-          path: cmake-build/duckOS.img
+          path: build/i686/duckOS.img
 

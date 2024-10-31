@@ -35,6 +35,7 @@
 #define PWINDOW_HINT_SHADOW 0x7
 #define PWINDOW_HINT_BLURBEHIND 0x8
 
+
 /**
  * A window Object representing a window in the Pond window system.
  */
@@ -154,6 +155,12 @@ namespace Pond {
 		void set_uses_alpha(bool alpha_blending);
 
 		/**
+		 * Sets whether the window will use alpha for hit testing.
+		 * @param hit_testing Whether to use alpha for hit testing (i.e. transparency will fall through)
+		 */
+		void set_uses_alpha_hit_testing(bool alpha_hit_testing);
+
+		/**
 		 * Gets the ID of the window.
 		 * @return The ID of the window.
 		 */
@@ -209,11 +216,6 @@ namespace Pond {
 		friend class Context;
 
 		Window(int id, Gfx::Rect rect, struct shm shm, Context* ctx);
-
-		/**
-		 * Flips the framebuffer.
-		 */
-		void flip_buffer();
 
 		int _id = -1; ///< The ID of the window.
 		Gfx::Rect _rect; ///< The rect of the window.

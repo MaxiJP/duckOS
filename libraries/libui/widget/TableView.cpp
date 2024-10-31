@@ -6,30 +6,10 @@
 
 using namespace UI;
 
-class TableViewCell: public Widget {
-public:
-	WIDGET_DEF(TableViewCell)
-
-	Gfx::Dimensions preferred_size() override {
-		return m_preferred_size;
-	}
-
-	void do_repaint(const DrawContext& ctx) override {
-		ctx.fill(ctx.rect(), m_color);
-	}
-
-private:
-	TableViewCell(Gfx::Dimensions size, Gfx::Color color, Duck::Ptr<Widget> widget): m_preferred_size(size), m_color(color) {
-		set_uses_alpha(true);
-		widget->set_sizing_mode(UI::FILL);
-		add_child(widget);
-	}
-
-	Gfx::Dimensions m_preferred_size;
-	Gfx::Color m_color;
-};
-
-TableView::TableView(int num_cols): m_num_cols(num_cols) {
+TableView::TableView(int num_cols, bool shows_tabs):
+	m_num_cols(num_cols),
+	m_show_tabs(shows_tabs)
+{
 	set_sizing_mode(UI::FILL);
 	for(int i = 0; i < num_cols; i++) {
 		m_header_labels.push_back("");
@@ -55,15 +35,20 @@ void TableView::set_delegate(Duck::Ptr<TableViewDelegate> delegate) {
 Duck::Ptr<Widget> TableView::lv_create_entry(int index) {
 	if(m_delegate.expired())
 		return nullptr;
+
+	auto color = index % 2 == 0 ? Theme::shadow_1() : Theme::shadow_2();
+	auto row = TableViewRow::make(color, self(), index);
 	auto delegate = m_delegate.lock();
-	auto layout = BoxLayout::make(BoxLayout::HORIZONTAL);
 	auto widths = calculate_column_widths();
 
 	for(int i = 0; i < m_num_cols; i++) {
-		auto color = index % 2 == 0 ? Theme::shadow_1() : Theme::shadow_2();
-		layout->add_child(TableViewCell::make(Gfx::Dimensions{widths[i], m_row_height}, color, delegate->tv_create_entry(index, i)));
+		row->add_child(TableViewCell::make(
+			Gfx::Dimensions{widths[i], m_row_height},
+			delegate->tv_create_entry(index, i)
+		));
 	}
-	return layout;
+
+	return row;
 }
 
 Gfx::Dimensions TableView::lv_preferred_item_dimensions() {
@@ -84,16 +69,24 @@ int TableView::lv_num_items() {
 
 void TableView::calculate_layout() {
 	auto dims = current_size();
-	m_list_view->set_layout_bounds({0, 16, dims.width, dims.height - 16});
+	auto tab_height = m_show_tabs ? c_tab_height : 0;
+	m_list_view->set_layout_bounds({
+		c_padding_tl,
+		tab_height + c_padding_tl,
+		dims.width - c_padding_tl - c_padding_br,
+		dims.height - tab_height - c_padding_tl - c_padding_br});
 	update_data();
 }
 
 void TableView::do_repaint(const DrawContext& ctx) {
-	int x = 0;
+	ctx.draw_inset_outline(ctx.rect());
+	if (!m_show_tabs)
+		return;
+	int x = c_padding_tl;
 	auto widths = calculate_column_widths();
 	for(int col = 0; col < m_num_cols; col++) {
-		auto width = col == m_num_cols - 1 ? current_size().width - x : widths[col];
-		auto col_rect = Gfx::Rect {x, 0, width, 16};
+		auto width = col == m_num_cols - 1 ? current_size().width - c_padding_br - x : widths[col];
+		auto col_rect = Gfx::Rect {x, c_padding_tl, width, c_tab_height};
 		ctx.draw_outset_rect(col_rect, Theme::bg());
 		ctx.draw_text(m_header_labels[col].c_str(), col_rect.inset(0, 4, 0, 4), BEGINNING, CENTER, Theme::font(), Theme::fg());
 		x += width;
@@ -101,11 +94,15 @@ void TableView::do_repaint(const DrawContext& ctx) {
 }
 
 Gfx::Dimensions TableView::preferred_size() {
-	return m_list_view->preferred_size() + Gfx::Dimensions {0, 16};
+	auto tab_height = m_show_tabs ? c_tab_height : 0;
+	auto out = m_list_view->preferred_size() + Gfx::Dimensions { c_padding_tl + c_padding_br, c_padding_tl + c_padding_br + tab_height};
+	out.height = std::min(out.height, 300);
+	return out;
 }
 
 Gfx::Dimensions TableView::minimum_size() {
-	return m_list_view->minimum_size() + Gfx::Dimensions {0, 16};
+	auto tab_height = m_show_tabs ? c_tab_height : 0;
+	return m_list_view->minimum_size() + Gfx::Dimensions {c_padding_tl + c_padding_br, c_padding_tl + c_padding_br + tab_height};
 }
 
 void TableView::initialize() {
@@ -137,12 +134,12 @@ std::vector<int> TableView::calculate_column_widths() {
 	}
 
 	// Figure out width of stretchy columns
-	auto remaining_width = current_size().width - 12 - total_width;
+	auto remaining_width = current_size().width - 12 - c_padding_tl - c_padding_br - total_width;
 	if(num_stretchy)
 		stretchy_width = std::max(16, remaining_width / num_stretchy);
 
 	// Add 1px to some stretchy columns if needed to make up for remainder
-	int stretchy_remainder = remaining_width % num_stretchy;
+	int stretchy_remainder = num_stretchy ? remaining_width % num_stretchy : 0;
 
 	// Calculate widths and return
 	std::vector<int> ret = m_column_widths;
@@ -151,4 +148,84 @@ std::vector<int> TableView::calculate_column_widths() {
 			width = stretchy_width + (std::max(stretchy_remainder--, 0) ? 1 : 0);
 
 	return ret;
+}
+
+bool TableView::row_clicked(Duck::Ptr<TableViewRow> row, Pond::MouseButtonEvent evt) {
+	auto delegate = m_delegate.lock();
+	if (!delegate)
+		return false;
+
+	if (!(evt.old_buttons & POND_MOUSE1) && (evt.new_buttons & POND_MOUSE1)) {
+		make_row_selection(row);
+		return true;
+	} else if (!(evt.old_buttons & POND_MOUSE2) && (evt.new_buttons & POND_MOUSE2)) {
+		make_row_selection(row);
+		open_row_menu(row);
+		return true;
+	}
+
+	return false;
+}
+
+void TableView::open_row_menu(Duck::Ptr<TableViewRow> row) {
+	auto delegate = m_delegate.lock();
+	auto menu = delegate->tv_entry_menu(row->m_row);
+	if (menu)
+		open_menu(menu);
+}
+
+void TableView::make_row_selection(Duck::Ptr<TableViewRow> row) {
+	auto delegate = m_delegate.lock();
+	auto mode = delegate->tv_selection_mode();
+	if (mode == NONE)
+		return;
+
+	m_selected_items.clear();
+	m_selected_items.insert(row->m_row);
+	delegate->tv_selection_changed(m_selected_items);
+
+	for (auto& child : m_list_view->get_children())
+		child->repaint();
+}
+
+/** TableViewCell **/
+
+TableViewCell::TableViewCell(Gfx::Dimensions size, Duck::Ptr<Widget> widget):
+		m_preferred_size(size)
+{
+	set_uses_alpha(true);
+	widget->set_sizing_mode(UI::FILL);
+	add_child(widget);
+}
+
+Gfx::Dimensions TableViewCell::preferred_size()  {
+	return m_preferred_size;
+}
+
+/** TableViewRow **/
+
+TableViewRow::TableViewRow(Gfx::Color color, Duck::Ptr<TableView> table_view, int row):
+	BoxLayout(HORIZONTAL),
+	m_color(color),
+	m_table_view(table_view),
+	m_row(row)
+{}
+
+void TableViewRow::do_repaint(const DrawContext& ctx) {
+	if (selected())
+		ctx.fill(ctx.rect(), UI::Theme::accent());
+	else
+		ctx.fill(ctx.rect(), m_color);
+}
+
+bool TableViewRow::on_mouse_button(Pond::MouseButtonEvent evt) {
+	auto table = m_table_view.lock();
+	if (!table)
+		return false;
+	return table->row_clicked(self(), evt);
+}
+
+bool TableViewRow::selected() {
+	auto& selected_items = m_table_view.lock()->m_selected_items;
+	return selected_items.find(m_row) != selected_items.end();
 }

@@ -167,7 +167,7 @@ Font* Font::load_bdf_shm(const char* path) {
 					else if(nibble_char >= 'a' && nibble_char <= 'f')
 						nibble = 0xa + (nibble_char - 'a');
 
-					line[x] = nibble & (0x8u >> (x % 4)) ? 0xFFFFFFFF : 0x00000000;
+					line[x] = nibble & (0x8u >> (x % 4)) ? 0xFF : 0x00;
 				}
 			}
 
@@ -176,7 +176,7 @@ Font* Font::load_bdf_shm(const char* path) {
 
 		//Close the file & allocate shared memory for the font data
 		fclose(file);
-		if(shmcreate(nullptr, total_memsz, &fontshm) < 0) {
+		if(shmcreate_named(nullptr, total_memsz, &fontshm, "Gfx::Font") < 0) {
 			perror("Couldn't load font: Couldn't create shared memory region");
 			return nullptr;
 		}
@@ -255,11 +255,11 @@ FontGlyph* Font::glyph(uint32_t codepoint) {
 	return glyph ? glyph : unknown_glyph;
 }
 
-Dimensions Font::size_of(const char* string) {
+Dimensions Font::size_of(std::string_view string) {
 	Rect bounding_box = {0, 0, 0, this->bounding_box().height};
 	Point cpos = {0, 0};
-	while(*string) {
-		auto glph = glyph(*string);
+	for (auto ch : string) {
+		auto glph = glyph(ch);
 		Point offset = {
 			glph->base_x - data->bounding_box.base_x,
 			(data->bounding_box.base_y - glph->base_y) + (data->size - glph->height)
@@ -270,7 +270,6 @@ Dimensions Font::size_of(const char* string) {
 		};
 		bounding_box = bounding_box.combine(glyph_box);
 		cpos = cpos + Point {glph->next_offset.x, glph->next_offset.y};
-		string++;
 	}
 	return bounding_box.dimensions();
 }

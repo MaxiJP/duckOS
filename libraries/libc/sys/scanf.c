@@ -73,6 +73,13 @@ int common_scanf(char* buffer, const char* format, va_list arg) {
 				format++;
 				size = sizeof(long long int);
 			}
+		} else if(*format == 'h') {
+			format++;
+			size = sizeof(uint16_t);
+			if(*format == 'h') {
+				format++;
+				size = sizeof(uint8_t);
+			}
 		} else if(*format == 'j') {
 			format++;
 			size = sizeof(intmax_t);
@@ -163,13 +170,15 @@ int common_scanf(char* buffer, const char* format, va_list arg) {
 				long double val = strtold(buffer, &buffer);
 				switch(arg_width) {
 					case 0:
-						*va_arg(arg, float*) = val;
+						*va_arg(arg, float*) = (float) val;
 						break;
 					case sizeof(long int):
-						*va_arg(arg, double*) = val;
+						*va_arg(arg, double*) = (double) val;
 						break;
 					case sizeof(long double):
 						*va_arg(arg, long double*) = val;
+						break;
+					default:
 						break;
 				}
 				break;

@@ -1,13 +1,20 @@
 SET(SOURCES
+        arpa/inet.cpp
         assert.c
-        crt0.c
         ctype.c
         cxxabi.c
         dirent.c
+        dlfcn.cpp
         errno.c
         fcntl.c
+        ifaddrs.c
         locale.c
+        libgen.cpp
+        math.c
         poll.c
+        pthread.cpp
+        sched.c
+        setjmp.S
         signal.c
         stdio.c
         stdlib.c
@@ -15,9 +22,13 @@ SET(SOURCES
         strings.c
         sys/ioctl.c
         sys/shm.c
+        sys/futex.c
         sys/printf.c
+        sys/ptrace.c
         sys/liballoc.cpp
+        sys/resource.c
         sys/scanf.c
+        sys/socket.c
         sys/socketfs.c
         sys/stat.c
         sys/status.c
@@ -52,7 +63,7 @@ ADD_LIBRARY(libc_dyn SHARED ${SOURCES})
 SET_TARGET_PROPERTIES(libc_dyn PROPERTIES PREFIX "")
 set_target_properties(libc_dyn PROPERTIES OUTPUT_NAME libc)
 TARGET_LINK_DIRECTORIES(libc_dyn PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-TARGET_LINK_LIBRARIES(libc_dyn crti crt0 gcc stdc++ supc++ crtn)
+TARGET_LINK_LIBRARIES(libc_dyn crti gcc stdc++ supc++ crtn)
 ADD_CUSTOM_COMMAND(TARGET libc_dyn COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:libc_dyn> ${CMAKE_INSTALL_PREFIX}/lib/libc.so)
 
 # Make static libc
@@ -72,3 +83,9 @@ ADD_CUSTOM_TARGET(libc_headers
 # Combine libc_dyn and libc_static
 ADD_CUSTOM_TARGET(libc)
 ADD_DEPENDENCIES(libc libc_headers libc_dyn libc_static)
+
+# Tell linker to use libc for pthread
+file(WRITE "${CMAKE_STAGING_PREFIX}/lib/libpthread.so" "INPUT(libc.so)")
+file(WRITE "${CMAKE_STAGING_PREFIX}/lib/libpthread.a" "INPUT(libc.a)")
+file(WRITE "${CMAKE_STAGING_PREFIX}/lib/libm.so" "INPUT(libc.so)")
+file(WRITE "${CMAKE_STAGING_PREFIX}/lib/libm.a" "INPUT(libc.a)")

@@ -27,6 +27,9 @@
 #include <kernel/User.h>
 #include <kernel/kstd/string.h>
 #include "../api/poll.h"
+#include "../api/mmap.h"
+#include "Tracer.h"
+#include "../kstd/KLog.h"
 
 class FileDescriptor;
 class Blocker;
@@ -46,7 +49,8 @@ public:
 	enum State {
 		ALIVE = 0, //The process has not exited yet
 		ZOMBIE = 1, //The process has exited and needs to be reaped
-		DEAD = 2 //The process has been reaped and needs to be removed from the process table
+		DEAD = 2, //The process has been reaped and needs to be removed from the process table
+		STOPPED = 4, //The process has been stopped by a signal or debugger
 	};
 
 	~Process();
@@ -62,8 +66,8 @@ public:
 	void set_ppid(pid_t ppid);
 	pid_t sid();
 	User user();
-	kstd::string name();
-	kstd::string exe();
+	const kstd::string& name();
+	const kstd::string& exe();
 	kstd::Arc<LinkedInode> cwd();
 	void set_tty(kstd::Arc<TTYDevice> tty);
 	State state();
@@ -80,8 +84,7 @@ public:
 
 	//Signals and death
 	void kill(int signal);
-	void handle_pending_signal();
-	bool has_pending_signals();
+	void die();
 
 	//Memory
 	PageDirectory* page_directory();
@@ -92,15 +95,18 @@ public:
 	size_t used_vmem() const;
 	size_t used_shmem() const;
 
+	//Tracing
+	bool is_traced_by(Process* proc);
+	bool is_traced();
+
 	//Syscalls
 	void check_ptr(const void* ptr, bool write = false);
 	void sys_exit(int status);
 	ssize_t sys_read(int fd, UserspacePointer<uint8_t> buf, size_t count);
 	ssize_t sys_write(int fd, UserspacePointer<uint8_t> buf, size_t count);
-	pid_t sys_fork(Registers& regs);
+	pid_t sys_fork(ThreadRegisters& regs);
 	int exec(const kstd::string& filename, ProcessArgs* args);
 	int sys_execve(UserspacePointer<char> filename, UserspacePointer<char*> argv, UserspacePointer<char*> envp);
-	int sys_execvp(UserspacePointer<char> filename, UserspacePointer<char*> argv);
 	int sys_open(UserspacePointer<char> filename, int options, int mode);
 	int sys_close(int file);
 	int sys_chdir(UserspacePointer<char> path);
@@ -151,7 +157,7 @@ public:
 	int sys_fchown(int fd, uid_t uid, gid_t gid);
 	int sys_lchown(UserspacePointer<char> file, uid_t uid, gid_t gid);
 	int sys_ioctl(int fd, unsigned request, UserspacePointer<void*> argp);
-	int sys_shmcreate(void* addr, size_t size, UserspacePointer<struct shm> s);
+	int sys_shmcreate(UserspacePointer<shmcreate_args> args_p);
 	int sys_shmattach(int id, void* addr, UserspacePointer<struct shm> s);
 	int sys_shmdetach(int id);
 	int sys_shmallow(int id, pid_t pid, int perms);
@@ -163,21 +169,51 @@ public:
 	int sys_threadjoin(tid_t tid, UserspacePointer<void*> retp);
 	int sys_threadexit(void* return_value);
 	int sys_access(UserspacePointer<char> pathname, int mode);
-	ResultRet<void*> sys_mmap(UserspacePointer<struct mmap_args> args);
+	Result sys_mmap(UserspacePointer<struct mmap_args> args);
 	int sys_munmap(void* addr, size_t length);
 	int sys_mprotect(void* addr, size_t length, int prot);
 	int sys_uname(UserspacePointer<struct utsname> buf);
+	int sys_ptrace(UserspacePointer<struct ptrace_args> args);
+	int sys_socket(int domain, int type, int protocol);
+	int sys_bind(int sockfd, UserspacePointer<struct sockaddr> addr, uint32_t addrlen);
+	int sys_connect(int sockfd, UserspacePointer<struct sockaddr> addr, uint32_t addrlen);
+	int sys_setsockopt(UserspacePointer<struct setsockopt_args> ptr);
+	int sys_getsockopt(UserspacePointer<struct getsockopt_args> ptr);
+	int sys_recvmsg(int sockfd, UserspacePointer<struct msghdr> msg, int flags);
+	int sys_sendmsg(int sockfd, UserspacePointer<struct msghdr> msg, int flags);
+	int sys_getifaddrs(UserspacePointer<struct ifaddrs> buf, size_t memsz);
+	int sys_listen(int sockfd, int backlog);
+	int sys_shutdown(int sockfd, int how);
+	int sys_accept(int sockfd, UserspacePointer<struct sockaddr> addr, UserspacePointer<uint32_t> addrlen);
+	int sys_futex(UserspacePointer<int> futex, int operation);
 
 private:
 	friend class Thread;
 	friend class Reaper;
 	Process(const kstd::string& name, size_t entry_point, bool kernel, ProcessArgs* args, pid_t pid, pid_t ppid);
-	Process(Process* to_fork, Registers& regs);
+	Process(Process* to_fork, ThreadRegisters& regs);
 
 	void alert_thread_died(kstd::Arc<Thread> thread);
-	void recalculate_pmem_total();
 	void insert_thread(const kstd::Arc<Thread>& thread);
 	void remove_thread(const kstd::Arc<Thread>& thread);
+
+	template<typename F>
+	void for_each_thread(F&& callback) {
+		LOCK(_thread_lock);
+		for (auto tid : _tids) {
+			auto thread = get_thread(tid);
+			if(!thread)
+				continue;
+			if(!callback(thread))
+				break;
+		}
+	}
+
+	void reap();
+	bool stop(int signal);
+	bool is_stopping();
+	void cont();
+	void notify_thread_stopping(Thread* thread);
 
 	//Identifying info and state
 	kstd::string _name = "";
@@ -191,34 +227,40 @@ private:
 	mode_t _umask = 022;
 	int _exit_status = 0;
 	State _state;
+	bool _died_gracefully = false;
 	bool _kernel_mode = false;
-	bool _is_destroying = false;
+	Atomic<bool> _ready_to_destroy = false;
+	Atomic<bool> _stopping = false;
+	Mutex m_starting_lock {"Process::Starting"};
 
 	//Memory
 	kstd::Arc<VMSpace> _vm_space;
 	kstd::Arc<PageDirectory> _page_directory;
 	kstd::vector<kstd::Arc<VMRegion>> _vm_regions;
-	SpinLock m_mem_lock;
-	size_t m_used_pmem = 0;
+	Mutex m_mem_lock {"Process::Memory"};
 	size_t m_used_shmem = 0;
 
 	//Files & Pipes
+	Mutex m_fd_lock { "Process::FileDescriptor" };
 	kstd::vector<kstd::Arc<FileDescriptor>> _file_descriptors;
 	kstd::Arc<LinkedInode> _cwd;
 
 	//Signals
 	Signal::SigAction signal_actions[32] = {{Signal::SigAction()}};
-	kstd::queue<int> pending_signals;
-	SpinLock m_signal_lock;
 
 	//Threads
 	kstd::map<tid_t, kstd::Arc<Thread>> _threads;
 	kstd::map<tid_t, void*> _thread_return_values;
 	kstd::vector<tid_t> _tids;
 	tid_t _last_active_thread = 1;
-	SpinLock _thread_lock;
+	Mutex _thread_lock {"Process::Thread"};
+
+	//Tracing
+	Mutex _tracing_lock {"Process::Tracing"};
+	kstd::vector<kstd::Arc<Tracer>> _tracers;
 
 	Process* _self_ptr;
 };
 
+void print_arg(Process* thread, KLog::FormatRules rules);
 

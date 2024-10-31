@@ -25,10 +25,11 @@
 #include <kernel/kstd/unix_types.h>
 #include "Thread.h"
 #include "Process.h"
+#include "../arch/tasking.h"
 
 class Process;
 class Thread;
-class SpinLock;
+class Mutex;
 struct TSS;
 
 namespace TaskManager {
@@ -39,10 +40,10 @@ namespace TaskManager {
 	 *  the CRITICAL_LOCK macro to acquire g_tasking_lock and enter a critical state which will automatically be
 	 *  released after leaving the scope.
      */
-	extern SpinLock g_tasking_lock;
+	extern Mutex g_tasking_lock;
 
 	/** This lock is acquired while editing the process list. **/
-	extern SpinLock g_process_lock;
+	extern Mutex g_process_lock;
 
 	/** This is the thread at the beginning of the thread queue. The thread queue is updated on calls to `queue_thread`
 	 *  and in Thread::reap (which ensures that the reaped thread is removed from the queue.
@@ -50,6 +51,7 @@ namespace TaskManager {
 	extern Thread* g_next_thread;
 
 	void init();
+	void idle_task();
 	bool enabled();
 	bool is_idle();
 	bool is_preempting();
@@ -61,6 +63,7 @@ namespace TaskManager {
 	void queue_thread(const kstd::Arc<Thread>& thread);
 	kstd::Arc<Thread>& current_thread();
 	Process* current_process();
+	ResultRet<kstd::Arc<Thread>> thread_for_tid(tid_t tid);
 	ResultRet<Process*> process_for_pid(pid_t pid);
 	ResultRet<Process*> process_for_pgid(pid_t pgid, pid_t exclude = -1);
 	ResultRet<Process*> process_for_ppid(pid_t ppid, pid_t exclude = -1);
@@ -69,7 +72,6 @@ namespace TaskManager {
 	void kill_pgid(pid_t pgid, int sig);
 
 	bool yield();
-	bool yield_if_not_preempting();
 	bool yield_if_idle();
 	void do_yield_async();
 	void tick();
@@ -98,16 +100,12 @@ namespace TaskManager {
 		bool m_done = false;
 	};
 
-	void notify_current(uint32_t sig);
-
 	pid_t get_new_pid();
 	kstd::Arc<Thread> pick_next_thread();
 
 
 	extern "C" void preempt();
 	extern "C" void preempt_finish();
-	extern "C" void __attribute((cdecl)) preempt_init_asm(unsigned int new_esp);
-	extern "C" void __attribute((cdecl)) preempt_asm(unsigned int *old_esp, unsigned int *new_esp, uint32_t new_cr3);
 	extern "C" void proc_first_preempt();
 };
 

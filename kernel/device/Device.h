@@ -21,7 +21,7 @@
 
 #include <kernel/filesystem/File.h>
 #include <kernel/kstd/vector.hpp>
-#include <kernel/tasking/SpinLock.h>
+#include <kernel/tasking/Mutex.h>
 
 class Device: public File {
 public:
@@ -44,7 +44,9 @@ protected:
 
 private:
 	static kstd::vector<kstd::Arc<Device>> _devices;
-	static SpinLock _lock;
+	static Mutex _lock;
+
+	static void arch_init();
 
 	unsigned _major = 0;
 	unsigned _minor = 0;

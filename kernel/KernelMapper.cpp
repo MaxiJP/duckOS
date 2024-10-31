@@ -21,7 +21,6 @@
 #include <kernel/tasking/TaskManager.h>
 #include "KernelMapper.h"
 #include <kernel/kstd/cstring.h>
-#include <kernel/memory/PageDirectory.h>
 #include <kernel/memory/MemoryManager.h>
 #include <kernel/kstd/KLog.h>
 
@@ -63,12 +62,14 @@ void KernelMapper::load_map() {
 
 		//Figure out how long the name is and copy it to the symbol
 		size_t name_len = 0;
-		while(filebuf[current_byte + name_len] != '\n')
+		while(filebuf[current_byte + name_len] != '\n' && filebuf[current_byte + name_len] != '(')
 			name_len++;
 		symbol.name = new char[name_len + 1];
 		memcpy(symbol.name, &filebuf[current_byte], name_len);
 		symbol.name[name_len] = '\0';
-		current_byte += name_len + 1;
+		while (filebuf[current_byte] != '\n')
+			current_byte++;
+		current_byte++;
 
 		//Finally, add the symbol to the vector
 		symbols->push_back(symbol);
@@ -82,7 +83,8 @@ void KernelMapper::load_map() {
 	delete[] filebuf;
 	symbols->shrink_to_fit();
 
-	KLog::dbg("KernelMapper", "Map loaded with %d symbols between 0x%x and 0x%x", symbols->size(), lowest_addr, highest_addr);
+	KLog::dbg("KernelMapper", "Map loaded with {} symbols between {#x} and {#x}", symbols->size(), lowest_addr,
+			   highest_addr);
 #endif
 }
 
@@ -103,15 +105,19 @@ KernelMapper::Symbol* KernelMapper::get_symbol(size_t location) {
 	printf("Add -DADD_KERNEL_DEBUG_SYMBOLS:BOOL=ON to your CMake arguments to compile with debug symbols.\n");
 
 void KernelMapper::print_stacktrace() {
+	print_stacktrace((size_t) __builtin_frame_address(0));
+}
+
+void KernelMapper::print_stacktrace(size_t ebp) {
 #ifdef DUCKOS_KERNEL_DEBUG_SYMBOLS
 	if(!symbols)
 		printf("[Symbols not available yet]\n");
 
 	//Start walking the stack
-	auto* stk = (uint32_t*) __builtin_frame_address(0);
+	auto* stk = (size_t*) ebp;
 
 	for(unsigned int frame = 0; stk && frame < 4096; frame++) {
-		if(!MM.kernel_page_directory.is_mapped((VirtualAddress) stk, false))
+		if(!MM.kernel_page_directory.is_mapped((VirtualAddress) &stk[1], false))
 			break;
 
 		if(stk[1] < HIGHER_HALF)
@@ -130,12 +136,12 @@ void KernelMapper::print_stacktrace() {
 		//Finally, get the symbol name and print
 		auto* sym = KernelMapper::get_symbol(stk[1]);
 		if(sym)
-			printf("0x%x %s\n", stk[1], sym->name);
+			printf("0x%lx %s\n", stk[1], sym->name);
 		else
-			printf("0x%x\n", stk[1]);
+			printf("0x%lx\n", stk[1]);
 
 		//Continue walking the stack
-		stk = (uint32_t*) stk[0];
+		stk = (size_t*) stk[0];
 	}
 #else
 	SYMBOLS_NOT_ENABLED_MESSAGE
@@ -144,7 +150,7 @@ void KernelMapper::print_stacktrace() {
 
 void KernelMapper::print_userspace_stacktrace() {
 #ifdef DUCKOS_KERNEL_DEBUG_SYMBOLS
-	auto* stk = (uint32_t*) __builtin_frame_address(0);
+	auto* stk = (size_t*) __builtin_frame_address(0);
 	for(unsigned int frame = 0; stk && frame < 4096; frame++) {
 		if(!TaskManager::current_process()->page_directory()->is_mapped((size_t) stk, false) || !stk[1])
 			break;
@@ -154,7 +160,7 @@ void KernelMapper::print_userspace_stacktrace() {
 		}
 		if(stk[1] < HIGHER_HALF)
 			printf("0x%x\n", stk[1]);
-		stk = (uint32_t*) stk[0];
+		stk = (size_t*) stk[0];
 	}
 #else
 	SYMBOLS_NOT_ENABLED_MESSAGE

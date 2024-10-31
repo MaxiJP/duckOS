@@ -30,8 +30,13 @@ using Duck::Log;
 #define SEND_MESSAGE(name, data) { \
 auto __msgsend_res = server->endpoint()->send_message(name, id, data); \
 if(__msgsend_res.is_error()) { \
-	Log::err("Failed to send message ", name, " to client ", id, ": ", River::error_str(__msgsend_res.code())); \
-}} \
+    if (__msgsend_res.code() == ENOSPC) \
+        set_unresponsive(true); \
+    else \
+		Log::err("Failed to send message ", name, " to client ", id, ": ", River::error_str(__msgsend_res.code())); \
+} else { \
+	set_unresponsive(false); \
+}}
 
 Client::Client(Server* server, sockid_t id, pid_t pid): server(server), id(id), pid(pid) {
 
@@ -141,25 +146,27 @@ void Client::move_window(WindowMovePkt& params) {
 WindowResizedPkt Client::resize_window(WindowResizePkt& params) {
 	//TODO: Make sure size is reasonable
 
-	auto window = windows[params.window_id];
-	if(!window)
-		return {window->id(), -1};
+	auto window = windows.find(params.window_id);
+	if(window == windows.end())
+		return {params.window_id, -1};
 
-	window->set_dimensions(params.dims, false);
-	shmallow(window->framebuffer_shm().id, pid, SHM_WRITE | SHM_READ);
+	window->second->set_dimensions(params.dims, false);
+	shmallow(window->second->framebuffer_shm().id, pid, SHM_WRITE | SHM_READ);
 
-	return {window->id(), window->framebuffer_shm().id, window->rect()};
+	return {window->second->id(), window->second->framebuffer_shm().id, window->second->rect()};
 }
 
-void Client::invalidate_window(WindowInvalidatePkt& params) {
+bool Client::invalidate_window(WindowInvalidatePkt& params) {
 	auto window = windows.find(params.window_id);
 	if(window != windows.end()) {
-		window->second->set_flipped(params.flipped);
 		if(params.area.x < 0 || params.area.y < 0)
 			window->second->invalidate();
 		else
 			window->second->invalidate(params.area);
+		bool ret = window->second->flip();
+		return ret;
 	}
+	return false;
 }
 
 FontResponsePkt Client::get_font(GetFontPkt& params) {
@@ -172,27 +179,28 @@ FontResponsePkt Client::get_font(GetFontPkt& params) {
 }
 
 void Client::set_title(SetTitlePkt& params) {
-	auto* window = windows[params.window_id];
-	if(window)
-		windows[params.window_id]->set_title(params.title.str());
+	auto window = windows.find(params.window_id);
+	if(window != windows.end())
+		window->second->set_title(params.title.str());
 }
 
 void Client::reparent(WindowReparentPkt& params) {
-	auto* window = windows[params.window_id];
-	if(window)
-		window->reparent(windows[params.parent_id]);
+	auto window = windows.find(params.window_id);
+	auto parent = windows.find(params.parent_id);
+	if(window != windows.end() && parent != windows.end())
+		window->second->reparent(parent->second);
 }
 
 void Client::set_hint(SetHintPkt& params) {
-	auto* window = windows[params.window_id];
-	if(window)
-		window->set_hint(params.hint, params.value);
+	auto window = windows.find(params.window_id);
+	if(window != windows.end())
+		window->second->set_hint(params.hint, params.value);
 }
 
 void Client::bring_to_front(WindowToFrontPkt& params) {
-	auto* window = windows[params.window_id];
-	if(window)
-		window->move_to_front();
+	auto window = windows.find(params.window_id);
+	if(window != windows.end())
+		window->second->move_to_front();
 }
 
 Pond::DisplayInfoPkt Client::get_display_info(Pond::GetDisplayInfoPkt& pkt) {
@@ -208,13 +216,21 @@ const App::Info& Client::get_app_info() {
 }
 
 void Client::focus_window(Pond::WindowFocusPkt& pkt) {
-	auto* window = windows[pkt.window_id];
-	if(window)
-		window->focus();
+	auto window = windows.find(pkt.window_id);
+	if(window != windows.end())
+		window->second->focus();
 }
 
 void Client::set_minimum_size(Pond::WindowMinSizePkt& pkt) {
-	auto* window = windows[pkt.window_id];
-	if(window)
-		window->set_minimum_size(pkt.minimum_size);
+	auto window = windows.find(pkt.window_id);
+	if(window != windows.end())
+		window->second->set_minimum_size(pkt.minimum_size);
+}
+
+void Client::set_unresponsive(bool new_val) {
+	if(unresponsive == new_val)
+		return;
+	unresponsive = new_val;
+	for(auto window : windows)
+		window.second->invalidate();
 }

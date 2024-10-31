@@ -42,6 +42,7 @@ __DECL_BEGIN
 extern char** environ;
 
 pid_t fork();
+pid_t vfork();
 int execv(const char* path, char* const argv[]);
 int execve(const char* filename, char* const argv[], char* const envp[]);
 int execvpe(const char* filename, char* const argv[], char* const envp[]);
@@ -90,6 +91,14 @@ int dup2(int old_fd, int new_fd);
 int pipe(int pipefd[2]);
 int pipe2(int pipefd[2], int flags);
 
+#define _PC_NAME_MAX 0
+#define _PC_PATH_MAX 1
+#define _PC_VDISABLE 2
+#define _PC_LINK_MAX 3
+#define _POSIX_VDISABLE '\0'
+long pathconf(const char* path, int name);
+long fpathconf(int fd, int name);
+
 int chdir(const char* pathname);
 int fchdir(int fd);
 char* getcwd(char* buf, size_t size);
@@ -102,6 +111,8 @@ pid_t tcgetpgrp(int fd);
 int tcsetpgrp(int fd, pid_t pgid);
 
 unsigned int alarm(unsigned int seconds);
+
+int getpagesize();;
 
 void _exit(int status);
 

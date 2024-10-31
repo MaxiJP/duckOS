@@ -5,6 +5,8 @@ SET(SOURCES
         DrawContext.cpp
         Timer.cpp
         UIException.cpp
+        TextLayout.cpp
+        TextStorage.cpp
 
         bits/FilePicker.cpp
 
@@ -16,6 +18,7 @@ SET(SOURCES
         widget/Label.cpp
         widget/ProgressBar.cpp
         widget/Stack.cpp
+        widget/NamedCell.cpp
 
         widget/files/FileGridView.cpp
         widget/files/FileViewBase.cpp
@@ -29,6 +32,7 @@ SET(SOURCES
         widget/ListView.cpp
         widget/ScrollView.cpp
         widget/TableView.cpp
+        widget/TextView.cpp
 
         widget/layout/BoxLayout.cpp
         widget/layout/FlexLayout.cpp

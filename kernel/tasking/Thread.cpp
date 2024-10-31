@@ -28,6 +28,8 @@
 #include <kernel/memory/SafePointer.h>
 #include "../memory/AnonymousVMObject.h"
 #include "Reaper.h"
+#include "WaitBlocker.h"
+#include <kernel/arch/Processor.h>
 
 Thread::Thread(Process* process, tid_t tid, size_t entry_point, ProcessArgs* args):
 	_tid(tid),
@@ -36,14 +38,14 @@ Thread::Thread(Process* process, tid_t tid, size_t entry_point, ProcessArgs* arg
 	m_page_directory(process->_page_directory)
 {
 	//Create the kernel stack
-	_kernel_stack_region = MM.alloc_kernel_region(THREAD_KERNEL_STACK_SIZE);
+	_kernel_stack_region = MM.alloc_kernel_stack_region(THREAD_KERNEL_STACK_SIZE);
 	kstd::Arc<VMRegion> mapped_user_stack_region;
 	Stack user_stack(nullptr, 0);
 	Stack kernel_stack((void*) _kernel_stack_region->end());
 
 	if(!is_kernel_mode()) {
 		auto do_create_stack = [&]() -> Result {
-			auto stack_object = TRY(AnonymousVMObject::alloc(THREAD_STACK_SIZE));
+			auto stack_object = TRY(AnonymousVMObject::alloc(THREAD_STACK_SIZE, "stack"));
 			_stack_region = TRY(m_vm_space->map_stack(stack_object));
 			mapped_user_stack_region = MM.map_object(stack_object);
 			return Result(SUCCESS);
@@ -57,27 +59,7 @@ Thread::Thread(Process* process, tid_t tid, size_t entry_point, ProcessArgs* arg
 	}
 
 	//Setup registers
-	registers.eflags = 0x2;
-	registers.cs = _process->_kernel_mode ? 0x8 : 0x1B;
-	registers.eip = entry_point;
-	registers.eax = 0;
-	registers.ebx = 0;
-	registers.ecx = 0;
-	registers.edx = 0;
-	registers.ebp = user_stack.real_stackptr();
-	registers.edi = 0;
-	registers.esi = 0;
-	if(_process->_kernel_mode) {
-		registers.ds = 0x10; // ds
-		registers.es = 0x10; // es
-		registers.fs = 0x10; // fs
-		registers.gs = 0x10; // gs
-	} else {
-		registers.ds = 0x23; // ds
-		registers.es = 0x23; // es
-		registers.fs = 0x23; // fs
-		registers.gs = 0x23; // gs
-	}
+	registers = Processor::initial_thread_registers(_process->_kernel_mode, entry_point, user_stack.real_stackptr());
 
 	//Set up the user stack for the program arguments
 	args->setup_stack(user_stack);
@@ -89,7 +71,7 @@ Thread::Thread(Process* process, tid_t tid, size_t entry_point, ProcessArgs* arg
 		setup_kernel_stack(kernel_stack, user_stack.real_stackptr(), registers);
 }
 
-Thread::Thread(Process* process, tid_t tid, Registers& regs):
+Thread::Thread(Process* process, tid_t tid, ThreadRegisters& regs):
 	_process(process),
 	_tid(tid),
 	registers(regs),
@@ -97,12 +79,16 @@ Thread::Thread(Process* process, tid_t tid, Registers& regs):
 	m_page_directory(process->_page_directory)
 {
 	//Allocate kernel stack
-	_kernel_stack_region = MM.alloc_kernel_region(THREAD_KERNEL_STACK_SIZE);
+	_kernel_stack_region = MM.alloc_kernel_stack_region(THREAD_KERNEL_STACK_SIZE);
 
 	//Setup registers and stack
-	registers.eax = 0; // fork() in child returns zero
+#if defined(__i386__)
+	registers.gp.eax = 0; // fork() in child returns zero
 	Stack stack((void*) (_kernel_stack_region->start() + _kernel_stack_region->size()));
-	setup_kernel_stack(stack, regs.useresp, registers);
+	setup_kernel_stack(stack, regs.iret.esp, registers);
+#elif defined(__aarch64__)
+	// TODO: aarch64
+#endif
 }
 
 Thread::Thread(Process* process, tid_t tid, void* (*entry_func)(void* (*)(void*), void*), void* (* thread_func)(void*), void* arg):
@@ -112,14 +98,14 @@ Thread::Thread(Process* process, tid_t tid, void* (*entry_func)(void* (*)(void*)
 	m_page_directory(process->_page_directory)
 {
 	//Create the kernel stack
-	_kernel_stack_region = MM.alloc_kernel_region(THREAD_KERNEL_STACK_SIZE);
+	_kernel_stack_region = MM.alloc_kernel_stack_region(THREAD_KERNEL_STACK_SIZE);
 	kstd::Arc<VMRegion> mapped_user_stack_region;
 	Stack user_stack(nullptr, 0);
 	Stack kernel_stack((void*) (_kernel_stack_region->end()));
 
 	if(!is_kernel_mode()) {
 		auto do_create_stack = [&]() -> Result {
-			auto stack_object = TRY(AnonymousVMObject::alloc(THREAD_STACK_SIZE));
+			auto stack_object = TRY(AnonymousVMObject::alloc(THREAD_STACK_SIZE, "stack"));
 			_stack_region = TRY(m_vm_space->map_stack(stack_object));
 			mapped_user_stack_region = MM.map_object(stack_object);
 			return Result(SUCCESS);
@@ -134,32 +120,12 @@ Thread::Thread(Process* process, tid_t tid, void* (*entry_func)(void* (*)(void*)
 	}
 
 	//Setup registers
-	registers.eflags = 0x2;
-	registers.cs = _process->_kernel_mode ? 0x8 : 0x1B;
-	registers.eip = (size_t) entry_func;
-	registers.eax = 0;
-	registers.ebx = 0;
-	registers.ecx = 0;
-	registers.edx = 0;
-	registers.ebp = user_stack.real_stackptr();
-	registers.edi = 0;
-	registers.esi = 0;
-	if(_process->_kernel_mode) {
-		registers.ds = 0x10; // ds
-		registers.es = 0x10; // es
-		registers.fs = 0x10; // fs
-		registers.gs = 0x10; // gs
-	} else {
-		registers.ds = 0x23; // ds
-		registers.es = 0x23; // es
-		registers.fs = 0x23; // fs
-		registers.gs = 0x23; // gs
-	}
+	registers = Processor::initial_thread_registers(_process->_kernel_mode, (size_t) entry_func, user_stack.real_stackptr());
 
 	//Set up the user stack for the thread arguments
-	user_stack.push_sizet((size_t) arg);
-	user_stack.push_sizet((size_t) thread_func);
-	user_stack.push_sizet(0);
+	user_stack.push<size_t>((size_t) arg);
+	user_stack.push<size_t>((size_t) thread_func);
+	user_stack.push<size_t>(0);
 
 	//Setup the kernel stack with register states
 	if(is_kernel_mode())
@@ -185,9 +151,10 @@ void* Thread::kernel_stack_top() {
 }
 
 Thread::State Thread::state() {
-	if(process()->state() != Process::ALIVE)
-		return (State) process()->state();
-	return _state;
+	auto proc_state = process()->state();
+	if (proc_state == Process::ALIVE)
+		return _state;
+	return (State) proc_state;
 }
 
 const char* Thread::state_name() {
@@ -200,6 +167,8 @@ const char* Thread::state_name() {
 			return "Dead";
 		case BLOCKED:
 			return "Blocked";
+		case STOPPED:
+			return "Stopped";
 		default:
 			return "Unknown";
 	}
@@ -213,23 +182,17 @@ void* Thread::return_value() {
 	return _return_value;
 }
 
-void Thread::kill() {
+void Thread::die() {
 	if(is_blocked()) {
-		if (_blocker->can_be_interrupted()) {
-			_blocker->interrupt();
-			unblock();
-		} else {
-			KLog::warn("Thread", "Could not interrupt %s(pid: %d, tid: %d) while killing...", _process->name().c_str(),  _process->pid(), _tid);
+		if (!interrupt()) {
+			KLog::warn("Thread", "Could not interrupt {}(pid: {}, tid: {}) while killing...", _process->name().c_str(),
+						_process->pid(), _tid);
 		}
 	}
 
-	if(TaskManager::current_thread().get() == this) {
-		enter_critical();
-		_waiting_to_die = true;
-		leave_critical();
-	} else {
-		Reaper::inst().reap(m_weak_self);
-	}
+	TaskManager::current_thread()->enter_critical();
+	_waiting_to_die = true;
+	TaskManager::current_thread()->leave_critical();
 }
 
 bool Thread::waiting_to_die() {
@@ -240,32 +203,73 @@ bool Thread::can_be_run() {
 	return state() == ALIVE;
 }
 
+void Thread::enter_trap_frame(TrapFrame* frame) {
+	frame->prev = _cur_trap_frame;
+	_cur_trap_frame = frame;
+}
+
+void Thread::exit_trap_frame() {
+	ASSERT(_cur_trap_frame);
+	_cur_trap_frame = _cur_trap_frame->prev;
+}
+
 PageDirectory* Thread::page_directory() const {
 	return m_page_directory ? m_page_directory.get() : &MM.kernel_page_directory;
 }
 
 void Thread::enter_critical() {
+	ASSERT(TaskManager::current_thread().get() == this);
 	_in_critical++;
 }
 
 void Thread::leave_critical() {
 	ASSERT(_in_critical);
+	ASSERT(TaskManager::current_thread().get() == this);
 	_in_critical--;
-	if(_waiting_to_die && !_in_critical) {
-		_waiting_to_die = false;
-		Reaper::inst().reap(m_weak_self);
-		ASSERT(TaskManager::yield());
+	if(!_in_critical) {
+		ASSERT(!_in_syscall);
+		if(_waiting_to_die) {
+			Reaper::inst().reap(m_weak_self);
+			ASSERT(TaskManager::yield());
+		}
+		stop_if_should_stop();
+		handle_pending_signal();
 	}
+
+}
+
+void Thread::enter_syscall() {
+	ASSERT(!_in_syscall);
+	enter_critical();
+	_in_syscall = true;
+}
+
+void Thread::leave_syscall() {
+	ASSERT(_in_syscall);
+	_in_syscall = false;
+	leave_critical();
+}
+
+bool Thread::in_syscall() {
+	return _in_syscall;
 }
 
 void Thread::block(Blocker& blocker) {
-	if(state() != ALIVE || _waiting_to_die)
+	if(state() != ALIVE)
 		PANIC("INVALID_BLOCK", "Tried to block thread %d of PID %d in state %s", _tid, _process->pid(), state_name());
 	ASSERT(!_blocker);
 
 	// Check if the blocker is already ready. If so, unblock immediately
 	if(blocker.is_ready())
 		return;
+
+	// If we have a pending signal and we can interrupt this, we should do so.
+	{
+		if (_pending_signals.load(MemoryOrder::Acquire) && blocker.can_be_interrupted()) {
+			blocker.interrupt();
+			return;
+		}
+	}
 
 	// Check for deadlock
 	// TODO: This will only detect if 2 threads are directly deadlocking each other. This will not detect deadlocks involving more than 2 threads.
@@ -282,9 +286,8 @@ void Thread::block(Blocker& blocker) {
 	}
 
 	{
-		TaskManager::ScopedCritical critical;
-		_state = BLOCKED;
 		_blocker = &blocker;
+		_state = BLOCKED;
 	}
 
 	ASSERT(TaskManager::yield());
@@ -296,10 +299,7 @@ void Thread::unblock() {
 	_blocker = nullptr;
 	if(_state == BLOCKED)
 		_state = ALIVE;
-	{
-		CRITICAL_LOCK(TaskManager::g_tasking_lock);
-		TaskManager::queue_thread(self());
-	}
+	TaskManager::queue_thread(self());
 }
 
 bool Thread::is_blocked() {
@@ -308,6 +308,16 @@ bool Thread::is_blocked() {
 
 bool Thread::should_unblock() {
 	return _blocker && (_blocker->is_ready() || _blocker->was_interrupted());
+}
+
+bool Thread::interrupt() {
+	if (!_blocker)
+		return false;
+	if (!_blocker->can_be_interrupted())
+		return false;
+	_blocker->interrupt();
+	unblock();
+	return true;
 }
 
 Result Thread::join(const kstd::Arc<Thread>& self_ptr, const kstd::Arc<Thread>& other, UserspacePointer<void*> retp) {
@@ -348,46 +358,39 @@ Result Thread::join(const kstd::Arc<Thread>& self_ptr, const kstd::Arc<Thread>& 
 	return Result(SUCCESS);
 }
 
-void Thread::acquired_lock(SpinLock* lock) {
+void Thread::acquired_lock(Mutex* lock) {
 	TaskManager::ScopedCritical crit;
 	if(_held_locks.size() == _held_locks.capacity())
 		PANIC("MAX_LOCKS", "A thread is holding way too many locks.");
-	if(lock != &MM.liballoc_spinlock && lock != &TaskManager::g_tasking_lock)
+	if(lock != &MM.s_liballoc_lock && lock != &TaskManager::g_tasking_lock)
 		_held_locks.push_back(lock);
 }
 
-void Thread::released_lock(SpinLock* lock) {
+void Thread::released_lock(Mutex* lock) {
 	TaskManager::ScopedCritical crit;
-	if(lock != &MM.liballoc_spinlock && lock != &TaskManager::g_tasking_lock) {
+	if(lock != &MM.s_liballoc_lock && lock != &TaskManager::g_tasking_lock) {
+		ASSERT(_held_locks.size());
 		// Ensure locks are acquired and released in the correct order
 		auto last_held = _held_locks.pop_back();
-		ASSERT(last_held == lock);
+		if (last_held != lock)
+			PANIC("POSSIBLE_DEADLOCK", "Last held lock is %s, expected %s", last_held->name().c_str(), lock->name().c_str());
 	}
 }
 
 bool Thread::call_signal_handler(int signal) {
+	ASSERT(!_in_critical);
+
+	TaskManager::ScopedCritical crit;
+	auto signal_loc = (size_t) _process->signal_actions[signal].action;
 	if(_ready_to_handle_signal || _in_signal || _just_finished_signal)
 		return false;
-
-	if(is_blocked()) {
-		if(_blocker->can_be_interrupted()) {
-			_blocker->interrupt();
-			unblock();
-		} else {
-			return false;
-		}
-	}
-
-	if(signal < 1 || signal >= 32)
-		return true;
-	auto signal_loc = (size_t) _process->signal_actions[signal].action;
-	if(!signal_loc || signal_loc >= HIGHER_HALF)
-		return true;
+	crit.exit();
 
 	//Allocate a userspace stack
-	auto alloc_user_stack = [&]() -> Result {
+	auto alloc_user_stack = [this]() -> Result {
 		if(!_sighandler_ustack_region) {
-			auto user_stack = TRY(AnonymousVMObject::alloc(THREAD_STACK_SIZE));
+			auto user_stack = TRY(AnonymousVMObject::alloc(THREAD_STACK_SIZE, "stack"));
+			user_stack->set_fork_action(VMObject::ForkAction::Ignore);
 			_sighandler_ustack_region = TRY(m_vm_space->map_object(user_stack, VMProt::RW));
 		}
 		return Result(SUCCESS);
@@ -403,48 +406,28 @@ bool Thread::call_signal_handler(int signal) {
 
 	//Allocate a kernel stack
 	if(!_sighandler_kstack_region)
-		_sighandler_kstack_region = MM.alloc_kernel_region(THREAD_KERNEL_STACK_SIZE);
+		_sighandler_kstack_region = MM.alloc_kernel_stack_region(THREAD_KERNEL_STACK_SIZE);
 
 	Stack user_stack((void*) k_ustack->end(), _sighandler_ustack_region->end());
 	Stack kernel_stack((void*) _sighandler_kstack_region->end());
 	_signal_stack_top = _sighandler_kstack_region->end();
 
 	//Push signal number and fake return address to the stack
-	user_stack.push_int(signal);
-	user_stack.push_sizet(SIGNAL_RETURN_FAKE_ADDR);
+	user_stack.push<int>(signal);
+	user_stack.push<size_t>(SIGNAL_RETURN_FAKE_ADDR);
 
 	//Setup signal registers
-	signal_registers.eflags = 0x2;
-	signal_registers.cs = _process->_kernel_mode ? 0x8 : 0x1B;
-	signal_registers.eip = signal_loc;
-	signal_registers.eax = 0;
-	signal_registers.ebx = 0;
-	signal_registers.ecx = 0;
-	signal_registers.edx = 0;
-	signal_registers.ebp = user_stack.real_stackptr();
-	signal_registers.edi = 0;
-	signal_registers.esi = 0;
-	if(_process->_kernel_mode) {
-		signal_registers.ds = 0x10; // ds
-		signal_registers.es = 0x10; // es
-		signal_registers.fs = 0x10; // fs
-		signal_registers.gs = 0x10; // gs
-	} else {
-		signal_registers.ds = 0x23; // ds
-		signal_registers.es = 0x23; // es
-		signal_registers.fs = 0x23; // fs
-		signal_registers.gs = 0x23; // gs
-	}
+	signal_registers = Processor::initial_thread_registers(_process->_kernel_mode, signal_loc, user_stack.real_stackptr());
 
 	//Set up the stack
 	setup_kernel_stack(kernel_stack, user_stack.real_stackptr(), signal_registers);
 
 	//Queue this thread
+	TaskManager::enter_critical();
 	_ready_to_handle_signal = true;
-	{
-		CRITICAL_LOCK(TaskManager::g_tasking_lock);
-		TaskManager::queue_thread(self());
-	}
+	TaskManager::leave_critical();
+
+	TaskManager::queue_thread(self());
 
 	// If this thread is the current thread, do a context switch
 	if(TaskManager::current_thread().get() == this)
@@ -482,19 +465,24 @@ void Thread::handle_pagefault(PageFault fault) {
 		ASSERT(TaskManager::yield());
 	}
 
+	auto space = fault.address >= HIGHER_HALF ? MM.kernel_space() : m_vm_space;
 
 	//Otherwise, try CoW and kill the process if it doesn't work
-	if(m_vm_space->try_pagefault(fault).is_error()) {
-		if(fault.instruction_pointer > HIGHER_HALF) {
-			PANIC("SYSCALL_PAGEFAULT", "A page fault occurred in the kernel (pid: %d, tid: %d, ptr: 0x%x, ip: 0x%x).", _process->pid(), _tid, fault.address, fault.instruction_pointer);
+#if defined(__i386__)
+	if(space->try_pagefault(fault).is_error()) {
+		if(fault.registers->interrupt_frame.eip > HIGHER_HALF) {
+			PANIC("SYSCALL_PAGEFAULT", "A page fault occurred in the kernel (pid: %d, tid: %d, ptr: 0x%x, ip: 0x%x).", _process->pid(), _tid, fault.address, fault.registers->interrupt_frame.eip);
 		}
-		KLog::warn("Thread", "PID %d thread %d made illegal memory access at 0x%x (eip: 0x%x)", _process->pid(), _tid, fault.address, fault.instruction_pointer);
+		KLog::warn("Thread", "PID {} thread {} made illegal memory access at {#x} (eip: {#x})", _process->pid(), _tid,
+					fault.address, fault.registers->interrupt_frame.eip);
 		_process->kill(SIGSEGV);
 	}
+#endif
+	// TODO: aarch64
 }
 
 void Thread::enqueue_thread(Thread* thread) {
-	ASSERT(TaskManager::g_tasking_lock.held_by_current_thread());
+	ASSERT(TaskManager::in_critical());
 	if(thread == this)
 		return;
 	if(m_next) {
@@ -511,46 +499,77 @@ Thread* Thread::next_thread() {
 	return next;
 }
 
-void Thread::setup_kernel_stack(Stack& kernel_stack, size_t user_stack_ptr, Registers& regs) {
+Result Thread::trace_attach(kstd::Arc<Tracer> trace) {
+	LOCK(m_tracing_lock);
+	if (trace->tracer_process() == _process)
+		return Result(EINVAL);
+	if (m_tracer)
+		return Result(EBUSY);
+	m_tracer = kstd::move(trace);
+	if (_process->state() != Process::STOPPED)
+		_process->kill(SIGSTOP);
+	KLog::dbg("Thread", "Thread {} being traced by {}", this, m_tracer->tracer_process());
+	return Result(SUCCESS);
+}
+
+void Thread::trace_detach() {
+	LOCK(m_tracing_lock);
+	if (_state != DEAD && _state != ZOMBIE) {
+		if (_process->state() == Process::STOPPED)
+			_process->kill(SIGCONT);
+		if (m_tracer)
+			KLog::dbg("Thread", "Thread {} tracing detached from {}", this, m_tracer->tracer_process());
+	}
+	m_tracer.reset();
+}
+
+void Thread::setup_kernel_stack(Stack& kernel_stack, size_t user_stack_ptr, ThreadRegisters& regs) {
+#if defined(__i386__)
 	//If usermode, push ss and useresp
-	if(!is_kernel_mode()) {
-		kernel_stack.push32(0x23);
-		kernel_stack.push_sizet(user_stack_ptr);
+	if(__builtin_expect(!is_kernel_mode(), true)) {
+		kernel_stack.push<uint32_t>(0x23); //ss
+		kernel_stack.push(user_stack_ptr); //esp
 	}
 
 	//Push EFLAGS, CS, and EIP for iret
-	kernel_stack.push32(regs.eflags); // eflags
-	kernel_stack.push32(regs.cs); // cs
-	kernel_stack.push32(regs.eip); // eip
+	kernel_stack.push<uint32_t>(regs.iret.eflags); // eflags
+	kernel_stack.push<uint32_t>(regs.iret.cs); // cs
+	kernel_stack.push<uint32_t>(regs.iret.eip); // eip
 
-	kernel_stack.push32(regs.eax);
-	kernel_stack.push32(regs.ebx);
-	kernel_stack.push32(regs.ecx);
-	kernel_stack.push32(regs.edx);
-	kernel_stack.push32(regs.ebp);
-	kernel_stack.push32(regs.edi);
-	kernel_stack.push32(regs.esi);
-	kernel_stack.push32(regs.ds);
-	kernel_stack.push32(regs.es);
-	kernel_stack.push32(regs.fs);
-	kernel_stack.push32(regs.gs);
+	kernel_stack.push<uint32_t>(regs.gp.eax);
+	kernel_stack.push<uint32_t>(regs.gp.ebx);
+	kernel_stack.push<uint32_t>(regs.gp.ecx);
+	kernel_stack.push<uint32_t>(regs.gp.edx);
+	kernel_stack.push<uint32_t>(regs.gp.ebp);
+	kernel_stack.push<uint32_t>(regs.gp.edi);
+	kernel_stack.push<uint32_t>(regs.gp.esi);
+	kernel_stack.push<uint32_t>(regs.seg.ds);
+	kernel_stack.push<uint32_t>(regs.seg.es);
+	kernel_stack.push<uint32_t>(regs.seg.fs);
+	kernel_stack.push<uint32_t>(regs.seg.gs);
 
 	if(_process->pid() != 0 || _tid != 0) {
-		kernel_stack.push_sizet((size_t) TaskManager::proc_first_preempt);
-		kernel_stack.push32(regs.eflags);
-		kernel_stack.push32(regs.ebx);
-		kernel_stack.push32(regs.esi);
-		kernel_stack.push32(regs.edi);
-		kernel_stack.push32(0); //Fake popped EBP
+		kernel_stack.push<size_t>((size_t) TaskManager::proc_first_preempt);
+		kernel_stack.push<uint32_t>(0x2u); /* Kernel eflags: We don't want interrupts enabled */
+		kernel_stack.push<uint32_t>(regs.gp.ebx); /* Kernel ebx */
+		kernel_stack.push<uint32_t>(regs.gp.esi); /* Kernel esi */
+		kernel_stack.push<uint32_t>(regs.gp.edi); /* Kernel edi */
+		kernel_stack.push<uint32_t>(0); //Fake popped EBP
 	}
 
-	regs.esp = (size_t) kernel_stack.stackptr();
-	regs.useresp = (size_t) user_stack_ptr;
+	regs.gp.esp = (size_t) kernel_stack.stackptr();
+	regs.iret.esp = (size_t) user_stack_ptr;
+#elif defined(__aarch64__)
+	// Push GP registers
+	for (auto i = 0; i < 31; i++)
+		kernel_stack.push<uint64_t>(regs.gp.regs[i]);
+	regs.sp = (size_t) kernel_stack.stackptr();
+#endif
 }
 
 void Thread::exit(void* return_value) {
 	_return_value = return_value;
-	kill();
+	die();
 }
 
 void Thread::reap() {
@@ -562,4 +581,123 @@ void Thread::reap() {
 		m_prev->m_next = m_next;
 	if(m_next)
 		m_next->m_prev = this;
+}
+
+void Thread::queue_signal(int signal) {
+	uint32_t old_pending = _pending_signals.load(MemoryOrder::Acquire);
+	uint32_t new_pending;
+	do {
+		new_pending = old_pending | (1 << signal);
+	} while(!_pending_signals.compare_exchange_strong(old_pending, new_pending, MemoryOrder::Acquire));
+}
+
+void Thread::stop_if_should_stop() {
+	if (_process->is_stopping() && _state == ALIVE && !in_critical()) {
+		_process->notify_thread_stopping(this);
+		_state = STOPPED;
+		if (TaskManager::current_thread().get() == this)
+			ASSERT(TaskManager::yield());
+	}
+}
+
+void Thread::handle_pending_signal() {
+	ASSERT(TaskManager::current_thread().get() == this);
+
+	int sig = 0;
+	uint32_t old_pending = _pending_signals.load(MemoryOrder::Acquire);
+	uint32_t new_pending;
+	do {
+		if(!old_pending)
+			return;
+		for(int i = 1; i < NSIG; i++) {
+			if(old_pending & (1 << i)) {
+				new_pending = old_pending & (~(1 << i));
+				sig = i;
+				break;
+			}
+		}
+	} while(!_pending_signals.compare_exchange_strong(old_pending, new_pending, MemoryOrder::Acquire));
+
+	handle_signal(sig);
+}
+
+bool Thread::handle_signal(int signal) {
+	ASSERT(signal > 0 && signal < NSIG && signal != SIGSTOP && signal != SIGTSTP && signal != SIGCONT);
+
+	// If we're being traced, first, notify the tracer.
+	m_tracing_lock.acquire();
+	if (m_tracer) {
+		if (!m_tracer->has_signal(signal)) {
+			// First, set the sent signal as pending.
+			m_tracer->set_signal(signal);
+			queue_signal(signal);
+
+			// Then, stop.
+			_process->stop(signal);
+			m_tracing_lock.release();
+			return true;
+		} else {
+			// The tracer has the signal flag for this set, which means we need to handle it now.
+			m_tracer->clear_signal(signal);
+		}
+	}
+	m_tracing_lock.release();
+
+	auto sigaction = _process->signal_actions[signal];
+
+	if(!sigaction.action && Signal::signal_severities[signal] >= Signal::KILL) {
+		// If this is a severe signal and we don't have a handler for it, die now.
+		die_from_signal(signal);
+	} else if (!sigaction.action && signal != SIGSTOP && signal != SIGTSTP && signal != SIGCONT) {
+		// No handler, don't worry about it
+		return true;
+	}
+
+	if(TaskManager::current_thread().get() != this || in_critical()) {
+		// If this thread is not the current one, queue the signal.
+		queue_signal(signal);
+
+		// Interrupt if needed.
+		if(in_critical() && is_blocked())
+			interrupt();
+	} else {
+		// Otherwise, if this is the current thread, dispatch immediately.
+		dispatch_signal(signal);
+	}
+
+	return true;
+}
+
+void Thread::dispatch_signal(int signal) {
+	ASSERT(!in_critical() && TaskManager::current_thread().get() == this);
+	ASSERT(signal != SIGSTOP && signal != SIGTSTP && signal != SIGCONT);
+
+	const auto sigaction = _process->signal_actions[signal];
+	const auto severity = Signal::signal_severities[signal];
+
+	if(severity >= Signal::KILL && !sigaction.action) {
+		die_from_signal(signal);
+		ASSERT(false);
+	}
+
+	if (sigaction.action)
+		call_signal_handler(signal);
+}
+
+void Thread::die_from_signal(int signal) {
+	if(Signal::signal_severities[signal] == Signal::FATAL)
+		KLog::warn("Process", "PID {} exiting with fatal signal {}", _process->_pid, Signal::signal_names[signal]);
+
+	// Notify relevant waiters
+	if (signal == SIGKILL && _process->_died_gracefully)
+		WaitBlocker::notify_all(_process, WaitBlocker::Exited, _process->_exit_status);
+	else
+		WaitBlocker::notify_all(_process, WaitBlocker::Signalled, signal);
+
+	// If the signal has no handler and is KILL or FATAL, then kill all threads
+	// Get the current thread as a raw pointer, so that if the current thread is part of this process the reference doesn't stay around
+	_process->die();
+}
+void print_arg(Thread* thread, KLog::FormatRules rules) {
+	printf("%s(%d.%d)", thread->process()->name().c_str(), thread->process()->pid(), thread->tid());
 }

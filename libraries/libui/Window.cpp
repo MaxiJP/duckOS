@@ -25,14 +25,16 @@
 
 using namespace UI;
 
-#define UI_TITLEBAR_HEIGHT 20
-#define UI_WINDOW_BORDER_SIZE 0
+#define UI_TITLEBAR_HEIGHT 22
+#define UI_WINDOW_BORDER_SIZE 3
 #define UI_WINDOW_PADDING 2
 
 Window::Window():
 	_window(pond_context->create_window(nullptr, {-1, -1, -1, -1}, true))
 {
 	_window->set_draggable(true);
+	if(UI::app_info().exists() && UI::app_info().icon())
+		_icon = UI::app_info().icon();
 }
 
 void Window::initialize() {
@@ -40,15 +42,7 @@ void Window::initialize() {
 }
 
 void Window::resize(Gfx::Dimensions dims) {
-	if(_decorated) {
-		int accessory_height = _titlebar_accessory ? _titlebar_accessory->preferred_size().height + UI_WINDOW_PADDING * 2 : 0;
-		_window->resize({
-			UI_WINDOW_BORDER_SIZE * 2 + dims.width,
-			UI_WINDOW_BORDER_SIZE * 2 + UI_TITLEBAR_HEIGHT + dims.height + accessory_height
-		});
-	} else {
-		_window->resize({dims.width, dims.height});
-	}
+	_window->resize({dims.width, dims.height});
 	if(_contents)
 		_contents->update_layout();
 	repaint();
@@ -63,9 +57,9 @@ Gfx::Rect Window::contents_rect() {
 		Gfx::Rect ret = _window->rect();
 		Gfx::Rect accessory = accessory_rect();
 		ret.width -= UI_WINDOW_BORDER_SIZE * 2;
-		ret.height -= UI_WINDOW_BORDER_SIZE * 2 + UI_TITLEBAR_HEIGHT + UI_WINDOW_PADDING * (has_accessory() ? 2 : 0) + accessory.height;
+		ret.height -= UI_WINDOW_BORDER_SIZE + UI_TITLEBAR_HEIGHT + UI_WINDOW_PADDING * (has_accessory() ? 2 : 0) + accessory.height;
 		ret.x = UI_WINDOW_BORDER_SIZE;
-		ret.y = UI_TITLEBAR_HEIGHT + UI_WINDOW_BORDER_SIZE + UI_WINDOW_PADDING * (has_accessory() ? 2 : 0) + accessory.height;
+		ret.y = UI_TITLEBAR_HEIGHT + UI_WINDOW_PADDING * (has_accessory() ? 2 : 0) + accessory.height;
 		return ret;
 	} else {
 		Gfx::Dimensions dims = _window->dimensions();
@@ -78,9 +72,9 @@ Gfx::Rect Window::accessory_rect() {
 		return Gfx::Rect();
 
 	return {
-		UI_WINDOW_PADDING + UI_WINDOW_BORDER_SIZE,
-		UI_TITLEBAR_HEIGHT + UI_WINDOW_BORDER_SIZE + UI_WINDOW_PADDING,
-		_window->rect().width - UI_WINDOW_BORDER_SIZE * 2 - UI_WINDOW_PADDING * 2,
+		UI_WINDOW_BORDER_SIZE,
+		UI_TITLEBAR_HEIGHT,
+		_window->rect().width - UI_WINDOW_BORDER_SIZE * 2,
 		_titlebar_accessory->preferred_size().height
 	};
 }
@@ -125,6 +119,11 @@ std::string Window::title() {
 	return _title;
 }
 
+void Window::set_icon(Duck::Ptr<const Gfx::Image> icon) {
+	_icon = icon;
+	repaint();
+}
+
 void Window::set_resizable(bool resizable) {
 	_resizable = resizable;
 	_window->set_resizable(resizable);
@@ -144,6 +143,11 @@ bool Window::is_closed() {
 
 void Window::bring_to_front() {
 	_window->bring_to_front();
+}
+
+void Window::focus() {
+	_focused = true;
+	_window->focus();
 }
 
 void Window::repaint() {
@@ -166,24 +170,21 @@ void Window::repaint_now() {
 			ctx.fill({0, 0, ctx.width(), ctx.height()}, Theme::window());
 
 		//Title bar
-		Gfx::Rect titlebar_rect = {0, 0, ctx.width(), UI_TITLEBAR_HEIGHT};
 
-		//Title bar background
-		ctx.fill_gradient_v(titlebar_rect.inset(0, 0, -accessory_rect().height - UI_WINDOW_PADDING * (has_accessory() ? 2 : 0), 0), Theme::window_titlebar_b(), Theme::window_titlebar_a());
+//		ctx.fill_gradient_v(titlebar_rect.inset(1, 2, -accessory_rect().height - (has_accessory() ? UI_WINDOW_PADDING * 4 : 0) + 2, 1), accent_color, accent_color.darkened());
 
 		//Title bar icon
 		int title_xpos = 4;
-		if(UI::app_info().exists() && UI::app_info().icon()) {
-			auto icon = UI::app_info().icon();
+		if(_icon) {
 			Gfx::Rect icon_rect {
-				titlebar_rect.position() + Gfx::Point {2, titlebar_rect.height / 2 - icon->size().width / 2},
+				titlebar_rect.position() + Gfx::Point {UI_WINDOW_BORDER_SIZE, titlebar_rect.height / 2 - 9},
 				{16, 16}
 			};
-			ctx.draw_image(icon, icon_rect);
-			title_xpos += 2 + icon->size().width;
+			ctx.draw_image(_icon, icon_rect);
+			title_xpos += 18;
 		}
 
-		int button_size = titlebar_rect.height - 4;
+		int button_size = titlebar_rect.height - 7;
 
 		//Title bar text
 		auto title_rect = titlebar_rect.inset(4, button_size + 4, 4, title_xpos);
@@ -192,12 +193,12 @@ void Window::repaint_now() {
 
 		//Buttons
 		_close_button.area = {
-				titlebar_rect.x + titlebar_rect.width - UI_WINDOW_PADDING - button_size,
-				titlebar_rect.y + 2,
+				titlebar_rect.x + titlebar_rect.width - button_size - UI_WINDOW_BORDER_SIZE - 1,
+				titlebar_rect.y + 3,
 				button_size,
 				button_size
 		};
-		ctx.draw_button(_close_button.area, Theme::image(_close_button.image), _close_button.pressed);
+		ctx.draw_button_base(_close_button.area, _close_button.pressed, accent_color.darkened());
 	} else {
 		ctx.fill({0, 0, ctx.width(), ctx.height()}, RGBA(0, 0, 0, 0));
 	}
@@ -213,6 +214,8 @@ void Window::repaint_now() {
 void Window::close() {
 	if(!_closed)
 		_window->destroy();
+	if(on_close)
+		on_close();
 	_closed = true;
 }
 
@@ -229,6 +232,7 @@ void Window::show() {
 	}
 
 	_window->set_hidden(false);
+	repaint_now();
 }
 
 void Window::hide() {
@@ -237,7 +241,15 @@ void Window::hide() {
 
 void Window::resize_to_contents() {
 	Gfx::Dimensions contents_size = _contents ? _contents->preferred_size() : Gfx::Dimensions {10, 10};
-	resize(contents_size);
+	if(_decorated) {
+		int accessory_height = _titlebar_accessory ? _titlebar_accessory->preferred_size().height + UI_WINDOW_PADDING * 2 : 0;
+		resize({
+			UI_WINDOW_BORDER_SIZE * 2 + contents_size.width,
+			UI_WINDOW_BORDER_SIZE + UI_TITLEBAR_HEIGHT + contents_size.height + accessory_height
+		});
+	} else {
+		resize(contents_size);
+	}
 }
 
 void Window::set_uses_alpha(bool uses_alpha) {
@@ -251,6 +263,7 @@ void Window::set_decorated(bool decorated) {
 		return;
 	_decorated = decorated;
 	_window->set_uses_alpha(_decorated ? _uses_alpha : true);
+	_window->set_has_shadow(_decorated ? true : !_uses_alpha);
 
 	//Adjust the rect of the window to keep the contents in the same position
 	Gfx::Rect new_rect = _window->rect();
@@ -279,8 +292,12 @@ Pond::Window* Window::pond_window() {
 }
 
 void Window::on_keyboard(Pond::KeyEvent evt) {
-	if(_focused_widget)
-		_focused_widget->on_keyboard(evt);
+	if(_focused_widget) {
+		if(!_focused_widget->on_keyboard(evt)) {
+			if(_titlebar_accessory)
+				_titlebar_accessory->on_keyboard(evt);
+		}
+	}
 }
 
 void Window::on_mouse_move(Pond::MouseMoveEvent event) {
@@ -292,23 +309,18 @@ void Window::on_mouse_move(Pond::MouseMoveEvent event) {
 
 	if(_close_button.pressed && !_mouse.in(_close_button.area)) {
 		_close_button.pressed = false;
-		_window->set_draggable(true);
 		repaint();
 	}
 
-	//TODO: Add some mechanism in pond to exclude an area from dragging
-	if(!_mouse.in(contents_rect()) && old_mouse.in(contents_rect()))
-		_window->set_draggable(true);
-	else if(_mouse.in(contents_rect()) && !old_mouse.in(contents_rect()))
-		_window->set_draggable(false);
-
-	auto do_widget = [&] (Duck::Ptr<Widget> widget) {
+	bool draggable = !_mouse.in(_close_button.area);
+	auto do_widget = [event, old_mouse, &draggable, this] (Duck::Ptr<Widget> widget) {
 		if(!widget)
 			return;
 
 		Pond::MouseMoveEvent evt = event;
 		if(evt.new_pos.in(widget->_rect)) {
 			evt.new_pos = evt.new_pos - widget->_rect.position();
+			draggable = _contents->widget_at(evt.new_pos)->window_draggable();
 			widget->evt_mouse_move(evt);
 		} else if(old_mouse.in(widget->_rect)) {
 			widget->evt_mouse_leave({
@@ -321,17 +333,25 @@ void Window::on_mouse_move(Pond::MouseMoveEvent event) {
 
 	do_widget(_contents);
 	do_widget(_titlebar_accessory);
+	if(_focused_widget && _focused_widget->receives_drag_events() && !event.new_pos.in(_focused_widget->_absolute_rect)) {
+		auto evt = event;
+		evt.new_pos = evt.new_pos - _focused_widget->_absolute_rect.position();
+		_focused_widget->evt_mouse_move(evt);
+	}
+	_window->set_draggable(draggable);
 }
 
 void Window::on_mouse_button(Pond::MouseButtonEvent evt) {
-	if(!(evt.old_buttons & POND_MOUSE1) && (evt.new_buttons & POND_MOUSE1)) {
+	bool pressed_mouse1 = !(evt.old_buttons & POND_MOUSE1) && (evt.new_buttons & POND_MOUSE1);
+	bool released_mouse1 = (evt.old_buttons & POND_MOUSE1) && !(evt.new_buttons & POND_MOUSE1);
+	if(pressed_mouse1) {
 		_window->bring_to_front();
 		if(_mouse.in(_close_button.area)) {
 			_close_button.pressed = true;
 			_window->set_draggable(false);
 			repaint();
 		}
-	} else if((evt.old_buttons & POND_MOUSE1) && !(evt.new_buttons & POND_MOUSE1)) {
+	} else if(released_mouse1) {
 		if(_close_button.pressed) {
 			close();
 		}
@@ -341,6 +361,10 @@ void Window::on_mouse_button(Pond::MouseButtonEvent evt) {
 		_contents->evt_mouse_button(evt);
 	if(_titlebar_accessory && _mouse.in(_titlebar_accessory->_rect))
 		_titlebar_accessory->evt_mouse_button(evt);
+
+	if(_focused_widget && _focused_widget->receives_drag_events() && (pressed_mouse1 || released_mouse1)) {
+		_focused_widget->evt_mouse_button(evt);
+	}
 }
 
 void Window::on_mouse_scroll(Pond::MouseScrollEvent evt) {
@@ -374,6 +398,9 @@ void Window::on_focus(bool focused) {
 }
 
 void Window::calculate_layout() {
+	if(!_contents)
+		return;
+
 	Gfx::Rect min_rect = {0, 0, 0, 0};
 
 	if(_decorated) {

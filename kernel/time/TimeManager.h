@@ -28,8 +28,8 @@ public:
 	static void init();
 	static TimeManager& inst();
 
-	static timespec uptime();
-	static timespec now();
+	static timeval uptime();
+	static timeval now();
 	static double percent_idle();
 
 protected:
@@ -41,10 +41,11 @@ private:
 
 	static TimeManager* _inst;
 	TimeKeeper* _keeper = nullptr;
-	timespec _epoch = {0, 0};
-	timespec _uptime = {0, 0};
+	timeval _epoch = {0, 0};
+	timeval _uptime = {0, 0};
 	int _ticks = 0;
+	time_t _boot_epoch = 0;
+	uint64_t _tsc_speed = 0; // Measured in MHz
 	kstd::circular_queue<bool> idle_ticks = kstd::circular_queue<bool>(100);
 };
-
 

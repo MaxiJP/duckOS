@@ -22,15 +22,37 @@
 #include "Thread.h"
 #include "Process.h"
 
-WaitBlocker::WaitBlocker(kstd::Arc<Thread> thread, pid_t wait_for) {
-	_thread = thread;
-	_wait_pid = wait_for;
+kstd::vector<kstd::Weak<WaitBlocker>> WaitBlocker::blockers;
+kstd::vector<WaitBlocker::Notification> WaitBlocker::unhandled_notifications;
+Mutex WaitBlocker::lock {"WaitBlocker"};
+
+kstd::Arc<WaitBlocker> WaitBlocker::make(kstd::Arc<Thread>& thread, pid_t wait_for, int options) {
+	auto new_blocker = kstd::Arc<WaitBlocker>(new WaitBlocker(thread, wait_for, options));
+	LOCK(WaitBlocker::lock);
+	// Make sure there's no unhandled notification we couldn't handle
+	for(size_t i = 0; i < unhandled_notifications.size(); i++) {
+		auto& notif = unhandled_notifications[i];
+		if (new_blocker->notify(notif.process, notif.reason, notif.status)) {
+			unhandled_notifications.erase(i);
+			break;
+		}
+	}
+	blockers.push_back(new_blocker);
+	return new_blocker;
+}
+
+WaitBlocker::WaitBlocker(kstd::Arc<Thread>& thread, pid_t wait_for, int options):
+	_ppid(thread->process()->pid()),
+	_wait_pid(wait_for),
+	_options(options),
+	_thread(thread)
+{
 	if(_wait_pid < -1) {
 		//Any child with pgid |pid|
 		_wait_pgid = -_wait_pid;
 	} else if(_wait_pid == 0) {
 		//Any child in same group
-		_wait_pgid = _thread->process()->pgid();
+		_wait_pgid = thread->process()->pgid();
 	} else {
 		//Any child / child with PID
 		_wait_pgid = -1;
@@ -38,29 +60,13 @@ WaitBlocker::WaitBlocker(kstd::Arc<Thread> thread, pid_t wait_for) {
 }
 
 bool WaitBlocker::is_ready() {
-	bool found_one = false;
-
-	auto* procs = TaskManager::process_list();
-	for(int i = 0; i < procs->size(); i++) {
-		auto proc = procs->at(i);
-		if(proc->ppid() == _thread->process()->pid()) {
-			found_one = true;
-			if((_wait_pgid == -1 || proc->pgid() == _wait_pgid) && (_wait_pid == -1 || proc->pid() == _wait_pid) && proc->state() == Process::ZOMBIE) {
-				_wait_pid = proc->pid();
-				_exit_status = proc->exit_status();
-				_waited_process = proc;
-				return true;
-			}
-		}
+	if (_ready.load(MemoryOrder::Acquire)) {
+		// Since we mark ourselves ready before all threads are stopped, wait until the process is *actually* stopped.
+		if (_reason == Stopped)
+			return _waited_process->state() == Process::STOPPED;
+		return true;
 	}
-
-	if(!found_one)
-		_err = -ECHILD;
-	return !found_one;
-}
-
-pid_t WaitBlocker::waited_pid() {
-	return _wait_pid;
+	return false;
 }
 
 Process* WaitBlocker::waited_process() {
@@ -71,6 +77,57 @@ pid_t WaitBlocker::error() {
 	return _err;
 }
 
-pid_t WaitBlocker::exit_status() {
-	return _exit_status;
+int WaitBlocker::status() {
+	return _status;
+}
+
+void WaitBlocker::notify_all(Process* proc, WaitBlocker::Reason reason, int status) {
+	if(proc->pid() == -1)
+		return;
+	LOCK(WaitBlocker::lock);
+	for(size_t i = 0; i < blockers.size(); i++) {
+		auto blocker = blockers[i].lock();
+		if (!blocker) {
+			blockers.erase(i);
+			i--;
+			continue;
+		}
+
+		if (blocker->notify(proc, reason, status)){
+			blockers.erase(i);
+			return;
+		}
+	}
+	// TODO: Will this just get full after a while?
+	unhandled_notifications.push_back({proc, reason, status});
+}
+
+bool WaitBlocker::notify(Process* proc, WaitBlocker::Reason reason, int status) {
+	// If the reason is a stop and the process has a tracer, we need to send it there first.
+	if (reason == Stopped && proc->is_traced() && !proc->is_traced_by(_thread->process()))
+		return false;
+
+	if (_ready.load())
+		return true;
+	if (proc->ppid() != _ppid && !proc->is_traced_by(_thread->process()))
+		return false;
+	if (_wait_pgid != -1 && proc->pgid() != _wait_pgid)
+		return false;
+	if (_wait_pid != -1 && proc->pid() != _wait_pid)
+		return false;
+	_reason = reason;
+	_waited_process = proc;
+	switch (reason) {
+		case Exited:
+			_status = __WIFEXITED | (status & 0xff);
+			break;
+		case Signalled:
+			_status = __WIFSIGNALED | (status & 0xff);
+			break;
+		case Stopped:
+			_status = __WIFSTOPPED | (status & 0xff);
+			break;
+	}
+	_ready.store(true, MemoryOrder::Release);
+	return true;
 }

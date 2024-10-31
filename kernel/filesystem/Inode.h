@@ -22,8 +22,9 @@
 #include <kernel/kstd/unix_types.h>
 #include <kernel/kstd/Arc.h>
 #include <kernel/Result.hpp>
-#include <kernel/tasking/SpinLock.h>
+#include <kernel/tasking/Mutex.h>
 #include "InodeMetadata.h"
+#include <kernel/kstd/Iteration.h>
 #include <kernel/memory/SafePointer.h>
 #include <kernel/kstd/string.h>
 
@@ -34,7 +35,7 @@ class FileDescriptor;
 class InodeVMObject;
 
 class Inode: public kstd::ArcSelf<Inode> {
-public:
+public :
 	Filesystem& fs;
 	ino_t id;
 
@@ -46,8 +47,8 @@ public:
 	virtual ResultRet<kstd::Arc<Inode>> find(const kstd::string& name);
 	virtual ino_t find_id(const kstd::string& name) = 0;
 	virtual ssize_t read(size_t start, size_t length, SafePointer<uint8_t> buffer, FileDescriptor* fd) = 0;
-	virtual ssize_t read_dir_entry(size_t start, SafePointer<DirectoryEntry> buffer, FileDescriptor* fd) = 0;
 	virtual ssize_t write(size_t start, size_t length, SafePointer<uint8_t> buffer, FileDescriptor* fd) = 0;
+	virtual void iterate_entries(kstd::IterationFunc<const DirectoryEntry&> callback) = 0;
 	virtual Result add_entry(const kstd::string& name, Inode& inode) = 0;
 	virtual ResultRet<kstd::Arc<Inode>> create_entry(const kstd::string& name, mode_t mode, uid_t uid, gid_t gid) = 0;
 	virtual Result remove_entry(const kstd::string& name) = 0;
@@ -62,11 +63,11 @@ public:
 
 	virtual InodeMetadata metadata();
 
-	kstd::Arc<InodeVMObject> shared_vm_object();
+	kstd::Arc<InodeVMObject> shared_vm_object(kstd::string name);
 
 protected:
 	InodeMetadata _metadata;
-	SpinLock lock, m_vmobject_lock;
+	Mutex lock {"Inode"}, m_vmobject_lock {"Inode::VMObject"};
 	kstd::Weak<InodeVMObject> m_shared_vm_object;
 	bool _exists = true;
 };

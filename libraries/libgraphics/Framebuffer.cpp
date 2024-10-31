@@ -354,6 +354,34 @@ void Framebuffer::fill_gradient_v(Rect area, Color color_a, Color color_b) const
 		fill({area.x, area.y + y, area.width, 1}, color_a.mixed(color_b, (float) y / area.height));
 }
 
+void Framebuffer::invert(Gfx::Rect area) const {
+	//Make sure area is in the bounds of the framebuffer
+	area = area.overlapping_area({0, 0, width, height});
+	if(area.empty())
+		return;
+
+	for(int y = 0; y < area.height; y++) {
+		for(int x = 0; x < area.width; x++) {
+			auto& color = data[x + area.x + (area.y + y) * width];
+			color = color.inverted();
+		}
+	}
+}
+
+void Framebuffer::invert_checkered(Gfx::Rect area) const {
+	//Make sure area is in the bounds of the framebuffer
+	area = area.overlapping_area({0, 0, width, height});
+	if(area.empty())
+		return;
+
+	for(int y = 0; y < area.height; y++) {
+		for(int x = y % 2; x < area.width; x+=2) {
+			auto& color = data[x + area.x + (area.y + y) * width];
+			color = color.inverted();
+		}
+	}
+}
+
 void Framebuffer::outline(Rect area, Color color) const {
 	fill({area.x + 1, area.y, area.width - 2, 1}, color);
 	fill({area.x + 1, area.y + area.height - 1, area.width - 2, 1}, color);
@@ -368,12 +396,38 @@ void Framebuffer::outline_blitting(Rect area, Color color) const {
 	fill_blitting({area.x + area.width - 1, area.y, 1, area.height}, color);
 }
 
-void Framebuffer::draw_text(const char* str, const Point& pos, Font* font, Color color) const {
+void Framebuffer::outline_inverting(Gfx::Rect area) const {
+	invert({area.x + 1, area.y, area.width - 2, 1});
+	invert({area.x + 1, area.y + area.height - 1, area.width - 2, 1});
+	invert({area.x, area.y, 1, area.height});
+	invert({area.x + area.width - 1, area.y, 1, area.height});
+}
+
+void Framebuffer::outline_inverting_checkered(Gfx::Rect area) const {
+	invert_checkered({area.x + 1, area.y, area.width - 2, 1});
+	invert_checkered({area.x + 1, area.y + area.height - 1, area.width - 2, 1});
+	invert_checkered({area.x, area.y, 1, area.height});
+	invert_checkered({area.x + area.width - 1, area.y, 1, area.height});
+}
+
+Point Framebuffer::draw_text(const char* str, const Gfx::Point& pos, Gfx::Font* font, Gfx::Color color) const {
 	Point current_pos = pos;
 	while(*str) {
 		current_pos = draw_glyph(font, *str, current_pos, color);
 		str++;
 	}
+	return current_pos;
+}
+
+Point Framebuffer::draw_text(const char* str, size_t len, const Point& pos, Font* font, Color color) const {
+	if(!len)
+		return pos;
+	Point current_pos = pos;
+	while(len--) {
+		current_pos = draw_glyph(font, *str, current_pos, color);
+		str++;
+	}
+	return current_pos;
 }
 
 Point Framebuffer::draw_glyph(Font* font, uint32_t codepoint, const Point& glyph_pos, Color color) const {
@@ -382,12 +436,6 @@ Point Framebuffer::draw_glyph(Font* font, uint32_t codepoint, const Point& glyph
 	int x_offset = glyph->base_x - font->bounding_box().base_x;
 	Point pos = {glyph_pos.x + x_offset, glyph_pos.y + y_offset};
 	Rect glyph_area = {0, 0, glyph->width, glyph->height};
-
-	//Calculate the color multipliers
-	double r_mult = COLOR_R(color) / 255.0;
-	double g_mult = COLOR_G(color) / 255.0;
-	double b_mult = COLOR_B(color) / 255.0;
-	double alpha_mult = COLOR_A(color) / 255.0;
 
 	//Make sure self_area is in bounds of the framebuffer
 	Rect self_area = {pos.x, pos.y, glyph_area.width, glyph_area.height};
@@ -405,14 +453,8 @@ Point Framebuffer::draw_glyph(Font* font, uint32_t codepoint, const Point& glyph
 		for(int x = 0; x < self_area.width; x++) {
 			auto& this_val = data[(self_area.x + x) + (self_area.y + y) * width];
 			auto& other_val = glyph->bitmap[(glyph_area.x + x) + (glyph_area.y + y) * glyph->width];
-			double alpha = (COLOR_A(other_val) / 255.00) * alpha_mult;
-			if(alpha == 0)
-				continue;
-			double oneminusalpha = 1.00 - alpha;
-			this_val = RGB(
-					(uint8_t) (COLOR_R(this_val) * oneminusalpha + COLOR_R(other_val) * alpha * r_mult),
-					(uint8_t) (COLOR_G(this_val) * oneminusalpha + COLOR_G(other_val) * alpha * g_mult),
-					(uint8_t) (COLOR_B(this_val) * oneminusalpha + COLOR_B(other_val) * alpha * b_mult));
+			if (other_val)
+				this_val = this_val.blended(color);
 		}
 	}
 
@@ -464,4 +506,10 @@ void Framebuffer::deserialize(const uint8_t*& buf) {
 	}
 	should_free = true;
 	buf += serialized_size();
+}
+
+void Framebuffer::put(Gfx::Point point, Gfx::Color color) const {
+	if(point.x >= width || point.y >= height || point.x < 0 || point.y < 0)
+		return;
+	ref_at(point) = color;
 }

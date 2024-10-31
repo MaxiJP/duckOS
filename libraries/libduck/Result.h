@@ -22,6 +22,7 @@
 #include <cassert>
 #include <optional>
 #include <cstring>
+#include <string>
 
 #define TRY(expr) \
 	({ \
@@ -29,6 +30,13 @@
         if (res.is_error()) \
             return res.result(); \
         res.value(); \
+    })
+
+#define TRYRES(expr) \
+	({ \
+        auto res = (expr); \
+        if (res.is_error()) \
+            return res; \
     })
 
 namespace Duck {
@@ -70,6 +78,7 @@ namespace Duck {
 		[[nodiscard]] std::string message() const { return m_result.message(); }
 		[[nodiscard]] bool has_message() const { return m_result.has_message(); }
 		[[nodiscard]] T& value() { return m_ret.value(); };
+		[[nodiscard]] const T& value() const { return m_ret.value(); };
 		[[nodiscard]] constexpr T value_or(T&& alt) && { return m_ret.value_or(std::forward<T>(alt)); }
 		operator T&() { return m_ret.value(); }
 

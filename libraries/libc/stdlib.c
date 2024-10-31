@@ -25,6 +25,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include "string.h"
+#include "fcntl.h"
 
 #define MAX_ATEXIT_FUNCS 256
 
@@ -627,4 +628,14 @@ char* mktemp(char* pattern) {
 	} while(access(pattern, F_OK));
 
 	return pattern;
+}
+
+static const char* __progname = NULL;
+
+const char* getprogname() {
+	return __progname;
+}
+
+void setprogname(const char* progname) {
+	__progname = progname;
 }

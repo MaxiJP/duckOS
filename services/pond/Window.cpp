@@ -38,6 +38,7 @@ Window::Window(Window* parent, const Gfx::Rect& rect, bool hidden): _parent(pare
 	if(_rect.height < 1)
 		_rect.height = 1;
 	alloc_framebuffer();
+	alloc_shadow_buffers();
 	_parent->_children.push_back(this);
 	_display->add_window(this);
 	recalculate_rects();
@@ -46,6 +47,7 @@ Window::Window(Window* parent, const Gfx::Rect& rect, bool hidden): _parent(pare
 
 Window::Window(Display* display): _parent(nullptr), _rect(display->dimensions()), _display(display), _id(++current_id) {
 	alloc_framebuffer();
+	alloc_shadow_buffers();
 	_display->set_root_window(this);
 	recalculate_rects();
 	invalidate();
@@ -74,7 +76,17 @@ Window* Window::parent() const {
 	return _parent;
 }
 
+Window* Window::menu_parent() const {
+	return _menu_parent;
+}
+
 void Window::reparent(Window* new_parent) {
+	//If this is a menu window, don't set the graphical parent; just note which window this is a menu for
+	if (_type == Pond::MENU) {
+		_menu_parent = new_parent;
+		return;
+	}
+
 	//If we have a parent, remove ourself from its children
 	if(_parent) {
 		for(auto it = _parent->_children.begin(); it < _parent->_children.end(); it++) {
@@ -136,20 +148,12 @@ Gfx::Rect Window::absolute_shadow_rect() const {
 	return _absolute_shadow_rect;
 }
 
+Gfx::Rect Window::old_absolute_shadow_rect() const {
+	return _pending_resize_invalidation_rect;
+}
+
 void Window::set_dimensions(const Gfx::Dimensions& new_dims, bool notify_client) {
-	if(new_dims.width == _rect.dimensions().width && new_dims.height == _rect.dimensions().height)
-		return;
-	Gfx::Dimensions dims = {
-		std::max(_minimum_size.width, new_dims.width),
-		std::max(_minimum_size.height, new_dims.height)
-	};
-	invalidate();
-	_rect = {_rect.x, _rect.y, dims.width, dims.height};
-	alloc_framebuffer();
-	recalculate_rects();
-	invalidate();
-	if(notify_client && _client)
-		_client->window_resized(this);
+	set_rect({_rect.position(), new_dims}, notify_client);
 }
 
 void Window::set_position(const Gfx::Point& position, bool notify_client) {
@@ -162,7 +166,16 @@ void Window::set_position(const Gfx::Point& position, bool notify_client) {
 }
 
 void Window::set_rect(const Gfx::Rect& rect, bool notify_client) {
-	invalidate();
+	if(!hidden()) {
+		if(!_pending_resize_invalidation_rect.empty()) {
+			_display->invalidate(_pending_resize_invalidation_rect);
+		}
+		if(_parent)
+			_pending_resize_invalidation_rect = _absolute_shadow_rect.overlapping_area(_parent->_absolute_rect);
+		else
+			_pending_resize_invalidation_rect = _absolute_shadow_rect.overlapping_area(_display->dimensions());
+	}
+
 	_rect = rect;
 	_rect.set_dimensions({
 		std::max(_rect.width, _minimum_size.width),
@@ -170,12 +183,12 @@ void Window::set_rect(const Gfx::Rect& rect, bool notify_client) {
 	});
 	alloc_framebuffer();
 	recalculate_rects();
-	invalidate();
 	if(notify_client && _client)
 		_client->window_resized(this);
 }
 
 void Window::invalidate() {
+	finalize_resize();
 	if(!hidden()) {
 		if(_parent)
 			_display->invalidate(_absolute_shadow_rect.overlapping_area(_parent->_absolute_rect));
@@ -185,6 +198,7 @@ void Window::invalidate() {
 }
 
 void Window::invalidate(const Gfx::Rect& area) {
+	finalize_resize();
 	if(hidden())
 		return;
 	if(_parent)
@@ -293,31 +307,44 @@ Gfx::Rect Window::calculate_absolute_rect(const Gfx::Rect& rect) {
 		return rect;
 }
 
-void Window::set_flipped(bool flipped) {
+bool Window::flip() {
+	_flipped = !_flipped;
 	_framebuffer = {
-			(Gfx::Color*) _framebuffer_shm.ptr + (flipped ? _rect.width * _rect.height : 0),
+			(Gfx::Color*) _framebuffer_shm.ptr + (_flipped ? _rect.width * _rect.height : 0),
 			_rect.width,
 			_rect.height
 	};
+	return _flipped;
 }
 
 void Window::alloc_framebuffer() {
-	if(_framebuffer.data) {
-		//Deallocate the old framebuffer since there is one
-		if(shmdetach(_framebuffer_shm.id) < 0) {
+	// Only reallocate if we need more space in the buffer
+	auto new_buffer_size = IMGSIZE(_rect.width, _rect.height) * 2;
+	if(!_framebuffer.data || new_buffer_size > _framebuffer_shm.size) {
+		//Deallocate the old framebuffer if there is one
+		if(_framebuffer.data && shmdetach(_framebuffer_shm.id) < 0) {
 			perror("Failed to deallocate framebuffer for window");
 			return;
 		}
+
+		// Allocate the new framebuffer
+		char namebuf[32];
+		snprintf(namebuf, 64, "Pond::Window %d", _id);
+		if(shmcreate_named(NULL, new_buffer_size, &_framebuffer_shm, namebuf) < 0) {
+			perror("Failed to allocate framebuffer for window");
+			return;
+		}
+	} else {
+		// Clear out the old framebuffer
+		memset(_framebuffer_shm.ptr, 0, _framebuffer_shm.size);
 	}
 
-	if(shmcreate(NULL, IMGSIZE(_rect.width, _rect.height) * 2, &_framebuffer_shm) < 0) {
-		perror("Failed to allocate framebuffer for window");
-		return;
-	}
+	_framebuffer = {(Gfx::Color*) _framebuffer_shm.ptr + (_flipped ? _rect.width * _rect.height : 0), _rect.width, _rect.height};
 
-	_framebuffer = {(Gfx::Color*) _framebuffer_shm.ptr, _rect.width, _rect.height};
+	alloc_shadow_buffers();
+}
 
-	// Now, allocate and draw the shadow buffer
+void Window::alloc_shadow_buffers() {
 	_shadow_buffers[0] = Gfx::Framebuffer(_rect.width + SHADOW_SIZE * 2, SHADOW_SIZE); // Top
 	_shadow_buffers[1] = Gfx::Framebuffer(_rect.width + SHADOW_SIZE * 2, SHADOW_SIZE); // Bottom
 	_shadow_buffers[2] = Gfx::Framebuffer(SHADOW_SIZE, _rect.height); // Left
@@ -349,6 +376,13 @@ void Window::recalculate_rects() {
 	_absolute_shadow_rect = _absolute_rect.inset(_draws_shadow ? -SHADOW_SIZE : 0);
 	for(auto child : _children)
 		child->recalculate_rects();
+}
+
+void Window::finalize_resize() {
+	if(_pending_resize_invalidation_rect.empty())
+		return;
+	_display->invalidate(_pending_resize_invalidation_rect);
+	_pending_resize_invalidation_rect = { 0, 0, 0, 0 };
 }
 
 shm Window::framebuffer_shm() {
@@ -418,6 +452,7 @@ bool Window::has_shadow() const {
 
 void Window::set_has_shadow(bool shadow) {
 	_draws_shadow = shadow;
+	invalidate();
 	recalculate_rects();
 	invalidate();
 }

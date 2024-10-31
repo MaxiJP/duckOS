@@ -28,6 +28,8 @@
 #include "Thread.h"
 #include "../kstd/KLog.h"
 #include "../filesystem/procfs/ProcFS.h"
+#include "WaitBlocker.h"
+#include "kernel/KernelMapper.h"
 
 Process* Process::create_kernel(const kstd::string& name, void (*func)()){
 	ProcessArgs args = ProcessArgs(kstd::Arc<LinkedInode>(nullptr));
@@ -41,6 +43,7 @@ ResultRet<Process*> Process::create_user(const kstd::string& executable_loc, Use
 	if(fd_or_error.is_error())
 		return fd_or_error.result();
 	auto fd = fd_or_error.value();
+	fd->set_path(executable_loc);
 
 	//Read info
 	auto info_or_err = ELF::read_info(fd, file_open_user);
@@ -75,8 +78,6 @@ ResultRet<Process*> Process::create_user(const kstd::string& executable_loc, Use
 	for(const auto& region : regions)
 		proc->_vm_regions.push_back(region);
 
-	proc->recalculate_pmem_total();
-
 	return proc->_self_ptr;
 }
 
@@ -104,11 +105,11 @@ User Process::user() {
 	return _user;
 }
 
-kstd::string Process::name(){
+const kstd::string& Process::name(){
 	return _name;
 }
 
-kstd::string Process::exe() {
+const kstd::string& Process::exe() {
 	return _exe;
 }
 
@@ -198,7 +199,7 @@ Process::Process(const kstd::string& name, size_t entry_point, bool kernel, Proc
 	insert_thread(kstd::Arc<Thread>(main_thread));
 }
 
-Process::Process(Process *to_fork, Registers &regs): _user(to_fork->_user), _self_ptr(this) {
+Process::Process(Process *to_fork, ThreadRegisters& regs): _user(to_fork->_user), _self_ptr(this) {
 	if(to_fork->_kernel_mode)
 		PANIC("KRNL_PROCESS_FORK", "Kernel processes cannot be forked.");
 
@@ -212,7 +213,6 @@ Process::Process(Process *to_fork, Registers &regs): _user(to_fork->_user), _sel
 	_pgid = to_fork->_pgid;
 	_umask = to_fork->_umask;
 	_tty = to_fork->_tty;
-	m_used_pmem = to_fork->m_used_pmem;
 	m_used_shmem = to_fork->m_used_shmem;
 	_state = ALIVE;
 
@@ -244,71 +244,51 @@ Process::Process(Process *to_fork, Registers &regs): _user(to_fork->_user), _sel
 
 Process::~Process() {
 	TaskManager::remove_process(this);
+	for (auto tracer : _tracers)
+		tracer->tracee_thread()->trace_detach();
 }
 
 void Process::kill(int signal) {
-	if(signal >= 0 && signal <= 32) {
-		Signal::SignalSeverity severity = Signal::signal_severities[signal];
-
-		//Print signal if unhandled and fatal
-		if(severity == Signal::FATAL && !signal_actions[signal].action) {
-			KLog::warn("Process", "PID %d exiting with fatal signal %s", _pid, Signal::signal_names[signal]);
-		}
-
-		if(severity >= Signal::KILL && !signal_actions[signal].action) {
-			// If the signal has no handler and is KILL or FATAL, then kill all threads
-			// Get the current thread as a raw pointer, so that if the current thread is part of this process the reference doesn't stay around
-			auto cur_thread = TaskManager::current_thread().get();
-			cur_thread->enter_critical();
-			for(auto tid : _tids)
-				get_thread(tid)->kill();
-			cur_thread->leave_critical();
-		} else if(signal_actions[signal].action) {
-			// We have a signal handler for this.
-			if(TaskManager::current_thread()->process() == this) {
-				// We are a thread from this process - try to handle the signal immediately.
-				if(!TaskManager::current_thread()->call_signal_handler(signal)) {
-					// We couldn't handle it - push it back to the queue.
-					LOCK(m_signal_lock);
-					pending_signals.push_back(signal);
-				}
-			} else {
-				// We are a thread from another process. Interrupt a thread if needed and queue the signal.
-				ScopedLocker thread_locker(_thread_lock);
-				ScopedLocker signal_locker(m_signal_lock);
-				pending_signals.push_back(signal);
-				TaskManager::ScopedCritical critical;
-				for(auto& tid : _tids) {
-					auto thread = get_thread(tid);
-					if(thread->state() == Thread::ALIVE)
-						break;
-					if(thread->is_blocked() && thread->_blocker->can_be_interrupted()) {
-						thread->_blocker->interrupt();
-						thread->unblock();
-						break;
-					}
-				}
-			}
-		}
+	if (_state != ALIVE && _state != STOPPED) {
+		const char* PROC_STATE_NAMES[] = {"Running", "Zombie", "Dead", "Sleeping", "Stopped"};
+		KLog::warn("Process", "Tried to kill process {} in state {}", _name, PROC_STATE_NAMES[_state]);
 	}
+	if (signal <= 0 || signal >= NSIG) {
+		KLog::err("Process", "Invalid signal {} sent to {}!", signal, _pid);
+		return;
+	}
+
+	bool did_handle = false;
+
+	// Special case for stop / continue
+	if (signal == SIGSTOP || signal == SIGTSTP) {
+		stop(signal);
+		return;
+	} else if (signal == SIGCONT) {
+		cont();
+		return;
+	}
+
+	// Find a thread to handle our signal
+	TaskManager::current_thread()->enter_critical();
+	for_each_thread([&did_handle, signal] (const kstd::Arc<Thread>& thread) -> bool {
+		did_handle = thread->handle_signal(signal);
+		return !did_handle;
+	});
+	TaskManager::current_thread()->leave_critical();
+
+	if (!did_handle)
+		KLog::err("Process", "No available thread for pid {} to handle signal {}", _pid, Signal::signal_names[signal]);
 }
 
-void Process::handle_pending_signal() {
-	// We have to enter critical while holding the lock, or else if the process has multiple threads
-	m_signal_lock.acquire_and_enter_critical();
-	if(!pending_signals.empty()) {
-		int sig = pending_signals.pop_front();
-		m_signal_lock.release();
-		TaskManager::leave_critical();
-		kill(sig);
-	} else {
-		m_signal_lock.release();
-		TaskManager::leave_critical();
-	}
-}
-
-bool Process::has_pending_signals() {
-	return !pending_signals.empty();
+void Process::die() {
+	auto cur_thread = TaskManager::current_thread().get();
+	cur_thread->enter_critical();
+	for_each_thread([&] (const kstd::Arc<Thread>& thread) -> bool {
+		thread->die();
+		return true;
+	});
+	cur_thread->leave_critical();
 }
 
 PageDirectory* Process::page_directory() {
@@ -335,7 +315,7 @@ ResultRet<kstd::Arc<VMRegion>> Process::map_object(kstd::Arc<VMObject> object, V
 }
 
 size_t Process::used_pmem() const {
-	return m_used_pmem;
+	return _vm_space->calculate_regular_anonymous_total();
 }
 
 size_t Process::used_vmem() const {
@@ -353,12 +333,12 @@ size_t Process::used_shmem() const {
 void Process::check_ptr(const void *ptr, bool write) {
 	auto region = _vm_space->get_region_containing((VirtualAddress) ptr);
 	if(region.is_error()) {
-		KLog::dbg("Process", "Pointer check at 0x%x failed for %s(%d): Not mapped", ptr, _name.c_str(), _pid);
+		KLog::dbg("Process", "Pointer check at {#x} failed for {}({}): Not mapped", ptr, _name, _pid);
 		kill(SIGSEGV);
 	}
 	auto prot = region.value()->prot();
 	if((!write && !prot.read) || (!prot.write && write)) {
-		KLog::dbg("Process", "Pointer check at 0x%x failed for %s(%d): Insufficient permissions", ptr, _name.c_str(), _pid);
+		KLog::dbg("Process", "Pointer check at {#x} failed for {}({}): Insufficient permissions", ptr, _name, _pid);
 		kill(SIGSEGV);
 	}
 }
@@ -374,17 +354,18 @@ void Process::alert_thread_died(kstd::Arc<Thread> thread) {
 		} else if(_pid == -1) {
 			// We are a process that just exec()'d. Nothing to do here.
 		} else {
-			KLog::warn("Process", "Process %d died and did not have a parent for SIGCHLD!", _pid);
+			KLog::warn("Process", "Process {} died and did not have a parent for SIGCHLD!", _pid);
 		}
 		TaskManager::reparent_orphans(this);
-		_state = ZOMBIE;
+		bool exp = false;
+		if (_ready_to_destroy.compare_exchange_strong(exp, true, MemoryOrder::Release)) {
+			// All threads died before reap() was called - just set state to zombie
+			_state = ZOMBIE;
+		} else {
+			// reap() was already called, delete ourselves now
+			delete this;
+		}
 	}
-}
-
-void Process::recalculate_pmem_total() {
-	if(_is_destroying || !_vm_space)
-		return;
-	m_used_pmem = _vm_space->calculate_regular_anonymous_total();
 }
 
 void Process::insert_thread(const kstd::Arc<Thread>& thread) {
@@ -403,4 +384,87 @@ void Process::remove_thread(const kstd::Arc<Thread>& thread) {
 			break;
 		}
 	}
+}
+
+void Process::reap() {
+	bool exp = false;
+	if (!_ready_to_destroy.compare_exchange_strong(exp, true, MemoryOrder::Acquire)) {
+		// We reaped after all threads died delete ourselves.
+		delete this;
+	}
+}
+
+bool Process::stop(int signal) {
+	bool ret = false;
+	if(_stopping.compare_exchange_strong(ret, true, MemoryOrder::Acquire)) {
+		WaitBlocker::notify_all(this, WaitBlocker::Stopped, signal);
+		for_each_thread([&] (kstd::Arc<Thread>& thread) -> bool {
+			if (thread->is_blocked())
+				thread->interrupt();
+			return true;
+		});
+		return true;
+	}
+	return false;
+}
+
+void Process::notify_thread_stopping(Thread* stopping_thread) {
+	bool all_stopped = true;
+	for_each_thread([&] (kstd::Arc<Thread>& thread) -> bool {
+		if(thread && thread.get() != stopping_thread && thread->state() != Thread::STOPPED)
+			all_stopped = false;
+		return all_stopped;
+	});
+
+	if(all_stopped)
+		_state = STOPPED;
+}
+
+bool Process::is_stopping() {
+	return _stopping.load(MemoryOrder::Relaxed);
+}
+
+void Process::cont() {
+	LOCK(m_starting_lock);
+	if (_state != STOPPED)
+		return;
+	_state = ALIVE;
+
+	for_each_thread([&] (kstd::Arc<Thread>& thread) -> bool {
+		thread->_state = Thread::ALIVE;
+		TaskManager::queue_thread(thread);
+		return true;
+	});
+
+	_stopping.store(false, MemoryOrder::Release);
+}
+
+bool Process::is_traced_by(Process* proc) {
+	bool is_traced = false;
+	for_each_thread([&] (kstd::Arc<Thread>& thread) -> bool {
+		LOCK(thread->m_tracing_lock);
+		if (thread->m_tracer && thread->m_tracer->tracer_process() == proc) {
+			is_traced = true;
+			return false;
+		}
+		return true;
+	});
+	return is_traced;
+}
+
+bool Process::is_traced() {
+	bool is_traced = false;
+	for_each_thread([&] (kstd::Arc<Thread>& thread) -> bool {
+		LOCK(thread->m_tracing_lock);
+		if (thread->m_tracer) {
+			is_traced = true;
+			return false;
+		}
+		return true;
+	});
+	return is_traced;
+}
+
+void print_arg(Process* process, KLog::FormatRules rules) {
+	printf("%s(%d)", process->name().c_str(), process->pid());
 }

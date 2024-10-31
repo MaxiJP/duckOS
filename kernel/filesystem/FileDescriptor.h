@@ -21,7 +21,7 @@
 
 #include <kernel/kstd/Arc.h>
 #include <kernel/kstd/string.h>
-#include <kernel/tasking/SpinLock.h>
+#include <kernel/tasking/Mutex.h>
 #include <kernel/kstd/unix_types.h>
 #include "File.h"
 #include <kernel/memory/SafePointer.h>
@@ -56,7 +56,6 @@ public:
 
 	int seek(off_t offset, int whence);
 	ssize_t read(SafePointer<uint8_t> buffer, size_t count);
-	ssize_t read_dir_entry(SafePointer<DirectoryEntry> buffer);
 	ssize_t read_dir_entries(SafePointer<char> buffer, size_t len);
 	ssize_t write(SafePointer<uint8_t> buffer, size_t count);
 	size_t offset() const;
@@ -82,7 +81,7 @@ private:
 	off_t _seek {0};
 	bool _is_fifo_writer = false;
 
-	SpinLock lock;
+	Mutex lock {"FileDescriptor"};
 };
 
 

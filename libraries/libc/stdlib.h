@@ -22,12 +22,14 @@
 
 #include <sys/cdefs.h>
 #include <stddef.h>
+#include <limits.h>
 
 __DECL_BEGIN
 
 #define EXIT_SUCCESS	0
 #define EXIT_FAILURE	1
 #define MB_CUR_MAX		1
+#define RAND_MAX    	32767
 
 //String <-> Number conversions
 double atof(const char* nptr);
@@ -106,6 +108,10 @@ int ptsname_r(int fd, char* buf, size_t buflen);
 
 // Temporary files
 char* mktemp(char* pattern);
+
+// Progname
+const char* getprogname();
+void setprogname(const char* progname);
 
 __DECL_END
 

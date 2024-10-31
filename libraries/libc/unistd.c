@@ -33,6 +33,10 @@ pid_t fork() {
 	return syscall(SYS_FORK);
 }
 
+pid_t vfork() {
+	return fork();
+}
+
 int execv(const char* path, char* const argv[]) {
 	return execve(path, argv, environ);
 }
@@ -239,6 +243,25 @@ int pipe2(int pipefd[2], int flags) {
 	return syscall3(SYS_PIPE, (int) pipefd, flags);
 }
 
+long pathconf(const char* path, int name) {
+	return fpathconf(0, name);
+}
+
+long fpathconf(int fd, int name) {
+	switch (name) {
+	case _PC_NAME_MAX:
+		return NAME_MAX;
+	case _PC_PATH_MAX:
+		return PATH_MAX;
+	case _PC_VDISABLE:
+		return _POSIX_VDISABLE;
+	case _PC_LINK_MAX:
+		return LINK_MAX;
+	default:
+		return 0;
+	}
+}
+
 int chdir(const char* pathname) {
 	return syscall2(SYS_CHDIR, (int) pathname);
 }
@@ -264,7 +287,7 @@ int sleep(unsigned secs) {
 }
 
 int usleep(useconds_t usec) {
-	struct timespec time = {0, usec};
+	struct timespec time = {0, usec * 1000};
 	struct timespec remainder;
 	return syscall3(SYS_SLEEP, (int) &time, (int) &remainder);
 }
@@ -284,4 +307,8 @@ unsigned int alarm(unsigned int seconds) {
 void _exit(int status) {
 	syscall2(SYS_EXIT, status);
 	__builtin_unreachable();
+}
+
+int getpagesize() {
+	return PAGE_SIZE;
 }

@@ -19,17 +19,20 @@
 
 #include <kernel/tasking/TaskManager.h>
 #include <kernel/kmain.h>
-#include <kernel/interrupt/irq.h>
+#include <kernel/arch/Processor.h>
 #include <kernel/filesystem/procfs/ProcFS.h>
 #include "TSS.h"
 #include "Process.h"
 #include "Thread.h"
 #include "Reaper.h"
+#include <kernel/arch/Processor.h>
 #include <kernel/kstd/KLog.h>
+#include <kernel/net/NetworkManager.h>
+#include "../device/DiskDevice.h"
 
 TSS TaskManager::tss;
-SpinLock TaskManager::g_tasking_lock;
-SpinLock TaskManager::g_process_lock;
+Mutex TaskManager::g_tasking_lock {"Tasking"};
+Mutex TaskManager::g_process_lock {"Process"};
 
 kstd::Arc<Thread> cur_thread;
 Process* kernel_process;
@@ -40,14 +43,30 @@ Atomic<int> next_pid = 0;
 bool tasking_enabled = false;
 bool yield_async = false;
 bool preempting = false;
-static uint8_t quantum_counter = 0;
 
 void kidle(){
 	tasking_enabled = true;
 	TaskManager::yield();
-	while(1) {
-		asm volatile("hlt");
+	TaskManager::idle_task();
+}
+
+ResultRet<kstd::Arc<Thread>> TaskManager::thread_for_tid(tid_t tid) {
+	if(!tid)
+		return Result(-ENOENT);
+	for(int i = 0; i < processes->size(); i++) {
+		auto cur = processes->at(i);
+		if(cur->pid() == 0 || cur->state() != Process::DEAD) {
+			for (auto& thread : cur->threads()) {
+				if (thread != tid)
+					continue;
+				auto threadobj = cur->get_thread(thread);
+				if (threadobj)
+					return threadobj;
+				return Result(ENOENT); // Thread must've died
+			}
+		}
 	}
+	return Result(ENOENT);
 }
 
 ResultRet<Process*> TaskManager::process_for_pid(pid_t pid){
@@ -133,9 +152,17 @@ pid_t TaskManager::get_new_pid(){
 
 void TaskManager::init(){
 	KLog::dbg("TaskManager", "Initializing tasking...");
-	g_tasking_lock.acquire();
-
 	processes = new kstd::vector<Process*>();
+
+	//Setup TSS
+	memset(&tss, 0, sizeof(TSS));
+	tss.ss0 = 0x10;
+	tss.cs = 0x0b;
+	tss.ss = 0x13;
+	tss.ds = 0x13;
+	tss.es = 0x13;
+	tss.fs = 0x13;
+	tss.gs = 0x13;
 
 	//Create kernel process
 	kernel_process = Process::create_kernel("[kernel]", kidle);
@@ -148,10 +175,17 @@ void TaskManager::init(){
 
 	//Create kernel threads
 	kernel_process->spawn_kernel_thread(kreaper_entry);
+	kernel_process->spawn_kernel_thread(NetworkManager::task_entry);
+	kernel_process->spawn_kernel_thread(DiskDevice::cache_writeback_task_entry);
 
 	//Preempt
 	cur_thread = kernel_process->get_thread(kernel_process->pid());
-	preempt_init_asm(cur_thread->registers.esp);
+	// TODO: AARCH64
+#if defined (__i686__)
+	preempt_init_asm(cur_thread->registers.gp.esp);
+#elif defined(__aarch64__)
+	Processor::start_initial_thread(cur_thread.get());
+#endif
 }
 
 kstd::vector<Process*>* TaskManager::process_list() {
@@ -172,7 +206,6 @@ int TaskManager::add_process(Process* proc){
 	processes->push_back(proc);
 	g_process_lock.release();
 
-	CRITICAL_LOCK(g_tasking_lock);
 	auto& threads = proc->threads();
 	for(const auto& tid : threads)
 		queue_thread(proc->get_thread(tid));
@@ -191,8 +224,6 @@ void TaskManager::remove_process(Process* proc) {
 }
 
 void TaskManager::queue_thread(const kstd::Arc<Thread>& thread) {
-	ASSERT(g_tasking_lock.held_by_current_thread());
-
 	if(!thread) {
 		KLog::warn("TaskManager", "Tried queueing null thread!");
 		return;
@@ -202,18 +233,15 @@ void TaskManager::queue_thread(const kstd::Arc<Thread>& thread) {
 		return;
 	}
 	if(thread->state() != Thread::ALIVE) {
-		KLog::warn("TaskManager", "Tried queuing %s thread!", thread->state_name());
+		KLog::warn("TaskManager", "Tried queuing {} thread!", thread->state_name());
 		return;
 	}
 
+	ScopedCritical crit;
 	if(g_next_thread)
 		g_next_thread->enqueue_thread(thread.get());
 	else
 		g_next_thread = thread.get();
-}
-
-void TaskManager::notify_current(uint32_t sig){
-	cur_thread->process()->kill(sig);
 }
 
 kstd::Arc<Thread> TaskManager::pick_next_thread() {
@@ -241,8 +269,7 @@ kstd::Arc<Thread> TaskManager::pick_next_thread() {
 
 bool TaskManager::yield() {
 	ASSERT(!preempting);
-	quantum_counter = 0;
-	if(Interrupt::in_irq()) {
+	if(Processor::in_interrupt()) {
 		// We can't yield in an interrupt. Instead, we'll yield immediately after we exit the interrupt
 		yield_async = true;
 		return false;
@@ -250,12 +277,6 @@ bool TaskManager::yield() {
 		preempt();
 		return true;
 	}
-}
-
-bool TaskManager::yield_if_not_preempting() {
-	if(!preempting)
-		return yield();
-	return true;
 }
 
 bool TaskManager::yield_if_idle() {
@@ -274,21 +295,21 @@ void TaskManager::do_yield_async() {
 }
 
 void TaskManager::tick() {
-	ASSERT(Interrupt::in_irq());
+	ASSERT(Processor::in_interrupt());
 	yield();
 }
 
 Atomic<int, MemoryOrder::SeqCst> g_critical_count = 0;
 
 void TaskManager::enter_critical() {
-	asm volatile("cli");
-	g_critical_count.add(1);
+	Processor::disable_interrupts();
+	g_critical_count.add(1, MemoryOrder::Acquire);
 }
 
 void TaskManager::leave_critical() {
 	ASSERT(g_critical_count.load() > 0);
-	if(g_critical_count.sub(1) == 1)
-		asm volatile("sti");
+	if(g_critical_count.sub(1, MemoryOrder::Release) == 1)
+		Processor::enable_interrupts();
 }
 
 bool TaskManager::in_critical() {
@@ -301,13 +322,12 @@ void TaskManager::preempt(){
 	ASSERT(!g_critical_count.load());
 
 	g_tasking_lock.acquire_and_enter_critical();
-	cur_thread->enter_critical();
 	preempting = true;
 
 	// Try unblocking threads that are blocked
 	if(g_process_lock.try_acquire()) {
 		for(auto& process : *processes) {
-			if(process->state() != Process::ALIVE)
+			if(process->state() != Process::ALIVE && process->state() != Process::STOPPED)
 				continue;
 			for(auto& tid : process->threads()) {
 				auto thread = process->get_thread(tid);
@@ -323,19 +343,24 @@ void TaskManager::preempt(){
 	// Pick a new thread
 	auto old_thread = cur_thread;
 	auto next_thread = pick_next_thread();
-	quantum_counter = 1; //Every process has a quantum of 1 for now
 
 	bool should_preempt = old_thread != next_thread;
 
 	//If we were just in a signal handler, don't save the esp to old_proc->registers
-	unsigned int* old_esp;
-	unsigned int dummy_esp;
+	uint32_t* old_esp;
+	uint32_t dummy_esp;
 	if(!old_thread) {
 		old_esp = &dummy_esp;
 	} if(old_thread->in_signal_handler()) {
-		old_esp = &old_thread->signal_registers.esp;
+		// TODO: aarch64
+#if defined (__i386__)
+		old_esp = &old_thread->signal_registers.gp.esp;
+#endif
 	} else {
-		old_esp = &old_thread->registers.esp;
+		// TODO: aarch64
+#if defined (__i386__)
+		old_esp = &old_thread->registers.gp.esp;
+#endif
 	}
 
 	//If we just finished handling a signal, set in_signal_handler to false.
@@ -353,12 +378,18 @@ void TaskManager::preempt(){
 	}
 
 	//If we're switching to a process in a signal handler, use the esp from signal_registers
-	unsigned int* new_esp;
+	uint32_t* new_esp;
 	if(next_thread->in_signal_handler()) {
-		new_esp = &next_thread->signal_registers.esp;
+		// TODO: aarch64
+#if defined (__i386__)
+		new_esp = &next_thread->signal_registers.gp.esp;
+#endif
 		tss.esp0 = (size_t) next_thread->signal_stack_top();
 	} else {
-		new_esp = &next_thread->registers.esp;
+		// TODO: aarch64
+#if defined (__i386__)
+		new_esp = &next_thread->registers.gp.esp;
+#endif
 		tss.esp0 = (size_t) next_thread->kernel_stack_top();
 	}
 
@@ -376,12 +407,18 @@ void TaskManager::preempt(){
 
 		cur_thread = next_thread;
 		next_thread.reset();
-		old_thread.reset();
 
-		asm volatile("fxsave %0" : "=m"(cur_thread->fpu_state));
+		Processor::save_fpu_state((void*&) old_thread->fpu_state);
+		old_thread.reset();
+		// TODO: AARCH64
+#if defined(__i386__)
 		preempt_asm(old_esp, new_esp, cur_thread->page_directory()->entries_physaddr());
-		asm volatile("fxrstor %0" ::"m"(cur_thread->fpu_state));
+#elif defined(__aarch64__)
+		Processor::switch_threads(old_thread.get(), cur_thread.get());
+#endif
+		Processor::load_fpu_state((void*&) cur_thread->fpu_state);
 	}
+
 
 	preempt_finish();
 }
@@ -390,8 +427,8 @@ void TaskManager::preempt_finish() {
 	ASSERT(g_tasking_lock.times_locked() == 1);
 	g_tasking_lock.release();
 	leave_critical();
-	// Handle a pending signal.
-	if(cur_thread->tid() != kernel_process->pid())
-		cur_thread->process()->handle_pending_signal();
-	cur_thread->leave_critical();
+
+	// Hack(?) to get signals to dispatch, thread to die if it needs, etc
+	cur_thread->enter_critical();
+	current_thread()->leave_critical();
 }

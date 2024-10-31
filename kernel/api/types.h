@@ -8,7 +8,7 @@
 
 __DECL_BEGIN
 
-typedef uint32_t size_t;
+typedef __SIZE_TYPE__ size_t;
 typedef int32_t ssize_t;
 typedef int pid_t;
 typedef int tid_t;
@@ -21,6 +21,7 @@ typedef unsigned short gid_t;
 typedef long off_t;
 typedef long blksize_t;
 typedef long blkcnt_t;
+typedef int id_t;
 
 typedef long suseconds_t;
 typedef unsigned long useconds_t;

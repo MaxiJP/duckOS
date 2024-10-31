@@ -59,19 +59,46 @@ void Button::set_label(std::string new_label) {
 
 void Button::set_style(ButtonStyle new_style) {
 	m_style = new_style;
-	set_uses_alpha(m_style == ButtonStyle::FLAT);
+	set_uses_alpha(m_style == ButtonStyle::FLAT || m_style == ButtonStyle::DISCREET || m_style == ButtonStyle::INSET);
 	calculate_layout();
+	repaint();
+}
+
+void Button::set_type(ButtonType new_type) {
+	m_type = new_type;
+}
+
+bool Button::is_pressed() {
+	return m_pressed;
+}
+
+void Button::set_pressed(bool pressed) {
+	m_pressed = pressed;
+	calculate_layout();
+	repaint();
+}
+
+void Button::set_foreground(Gfx::Color fg) {
+	m_label->set_color(fg);
+}
+
+void Button::set_background(Gfx::Color bg) {
+	m_bg_color = bg;
 	repaint();
 }
 
 bool Button::on_mouse_button(Pond::MouseButtonEvent evt) {
 	if(!(evt.old_buttons & POND_MOUSE1) && (evt.new_buttons & POND_MOUSE1)) {
-		m_pressed = true;
+		if(m_type == ButtonType::PRESS)
+			m_pressed = true;
+		else
+			m_pressed = !m_pressed;
 		calculate_layout();
 		repaint();
 		return true;
 	} else if((evt.old_buttons & POND_MOUSE1) && !(evt.new_buttons & POND_MOUSE1)) {
-		m_pressed = false;
+		if(m_type == ButtonType::PRESS)
+			m_pressed = false;
 		calculate_layout();
 		if(on_pressed)
 			on_pressed();
@@ -85,10 +112,9 @@ bool Button::on_mouse_button(Pond::MouseButtonEvent evt) {
 void Button::on_mouse_leave(Pond::MouseLeaveEvent evt) {
 	if(m_hovered) {
 		m_hovered = false;
-		if(m_style == ButtonStyle::FLAT)
-			repaint();
+		repaint();
 	}
-	if(m_pressed) {
+	if(m_pressed && m_type == ButtonType::PRESS) {
 		m_pressed = false;
 		calculate_layout();
 		repaint();
@@ -98,8 +124,7 @@ void Button::on_mouse_leave(Pond::MouseLeaveEvent evt) {
 bool Button::on_mouse_move(Pond::MouseMoveEvent evt) {
 	if(!m_hovered) {
 		m_hovered = true;
-		if(m_style == ButtonStyle::FLAT)
-			repaint();
+		repaint();
 	}
 	return false;
 }
@@ -127,14 +152,25 @@ void Button::do_repaint(const DrawContext& ctx) {
 		}
 		case ButtonStyle::INSET: {
 			if(m_pressed)
-				ctx.draw_inset_rect(ctx.rect());
+				ctx.draw_inset_rect(ctx.rect(), m_bg_color);
+			else if(m_hovered)
+				ctx.fill(ctx.rect(), m_bg_color.lightened());
 			else
-				ctx.fill(ctx.rect(), Theme::bg());
+				ctx.fill(ctx.rect(), Gfx::Color());
 			break;
 		}
 		case ButtonStyle::RAISED:
-			ctx.draw_button_base({0, 0, ctx.width(), ctx.height()}, m_pressed);
+			ctx.draw_button_base(ctx.rect(), m_pressed, m_hovered ? m_bg_color.lightened() : m_bg_color);
 			break;
+		case ButtonStyle::DISCREET:
+			if(m_pressed)
+				ctx.draw_inset_rect(ctx.rect(), m_bg_color);
+			else if(m_hovered)
+				ctx.draw_outset_rect(ctx.rect(), m_bg_color);
+			else
+				ctx.fill(ctx.rect(), Gfx::Color());
 	}
 
 }
+
+

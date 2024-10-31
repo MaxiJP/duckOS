@@ -24,6 +24,10 @@
 using namespace Gfx;
 using namespace Duck;
 
+#define highlighted(col) ((col).lightened(0.3))
+#define shadow1(col) ((col).darkened(0.4))
+#define shadow2(col) ((col).darkened(0.5))
+
 UI::DrawContext::DrawContext(const Framebuffer& framebuffer): fb(&framebuffer) {
 
 }
@@ -86,94 +90,47 @@ void UI::DrawContext::fill_rounded_rect(Gfx::Rect rect, Gfx::Color color, int ra
 	fill_ellipse({rect.position() + Point { rect.width - radius * 2, rect.height - radius * 2 }, corner_dims}, color);
 }
 
-void UI::DrawContext::draw_text(const char* str, Gfx::Rect rect, TextAlignment h_align, TextAlignment v_align, Font* font, Gfx::Color color, TruncationMode truncation) const {
-	// First, split up the text into lines
-	struct Line {
-		std::string text;
-		Dimensions bounds;
-	};
-
-	Point cur_pos = rect.position();
-	std::vector<Line> lines;
-	Line cur_line;
-	Dimensions total_dimensions {0, 0};
-
-	auto finalize_line = [&] {
-		cur_line.bounds = { font->size_of(cur_line.text.c_str()).width, font->bounding_box().height };
-		lines.push_back(cur_line);
-		cur_line.text.clear();
-		total_dimensions.width = std::max(cur_line.bounds.width, total_dimensions.width);
-		total_dimensions.height += cur_line.bounds.height;
-		cur_pos = {rect.x, cur_pos.y + font->bounding_box().height};
-	};
-
-	auto rect_for_glyph = [&](FontGlyph* glyph) {
-		return Rect {
-				glyph->base_x - font->bounding_box().base_x + cur_pos.x,
-				(font->bounding_box().base_y - glyph->base_y) + (font->size() - glyph->height) + cur_pos.y,
-				glyph->width,
-				glyph->height
-		};
-	};
-
-	while(*str) {
-		auto glyph = font->glyph(*str);
-		if(*str == '\n' || !rect_for_glyph(glyph).inside(rect)) {
-			// We ran out of space on the line, try line wrapping
-			finalize_line();
-			if(!rect_for_glyph(glyph).inside(rect)) {
-				// If we need ellipsis, add them
-				if(truncation == TruncationMode::ELLIPSIS && !lines.empty()) {
-					auto& last_line = lines[lines.size() - 1];
-					while(!last_line.text.empty() && font->size_of((last_line.text + "...").c_str()).width > rect.width)
-						last_line.text.erase(last_line.text.end() - 1);
-					last_line.text += "...";
-					last_line.bounds = { font->size_of(last_line.text.c_str()).width, font->bounding_box().height };
-					if(last_line.bounds.width > rect.width)
-						lines.erase(lines.end() - 1);
-				}
-				break;
-			}
-		}
-
-		cur_line.text += *str;
-		auto off = font->glyph(*str)->next_offset;
-		cur_pos += {off.x, off.y};
-		str++;
-	}
-
-	if(!cur_line.text.empty())
-		finalize_line();
-
+void UI::DrawContext::draw_text(const UI::TextLayout& layout, Gfx::Rect rect, UI::TextAlignment h_align, UI::TextAlignment v_align, Gfx::Color color) const {
 	// Next, apply vertical alignment
 	Point text_pos = rect.position();
 	switch(v_align) {
 		case BEGINNING:
 			break;
 		case CENTER:
-			text_pos.y = rect.y + rect.height / 2 - total_dimensions.height / 2;
+			text_pos.y = rect.y + rect.dimensions().height / 2 - layout.dimensions().height / 2;
 			break;
 		case END:
-			text_pos.y = rect.y + rect.height - total_dimensions.height;
+			text_pos.y = rect.y + rect.dimensions().height - layout.dimensions().height;
 			break;
 	}
 
 	// Then, draw all the lines
-	for(auto& line : lines) {
-		switch(h_align) {
-			case BEGINNING:
-				break;
-			case CENTER:
-				text_pos.x = rect.x + rect.width / 2 - line.bounds.width / 2;
-				break;
-			case END:
-				text_pos.x = rect.x + rect.width - line.bounds.width;
-				break;
+	auto text = layout.storage()->text();
+	for(auto& line : layout.lines()) {
+		if ((text_pos.y + layout.font()->bounding_box().height) >= 0 && text_pos.y < (rect.y + rect.height)) {
+			switch(h_align) {
+				case BEGINNING:
+					break;
+				case CENTER:
+					text_pos.x = rect.x + rect.dimensions().width / 2 - line.rect.width / 2;
+					break;
+				case END:
+					text_pos.x = rect.x + rect.dimensions().width - line.rect.width;
+					break;
+			}
+			auto substr = text.substr(line.index, line.length);
+			auto pos = fb->draw_text(substr.data(), line.length, text_pos, layout.font(), color);
+			if (line.ellipsis)
+				fb->draw_text("...", pos, layout.font(), color);
 		}
-
-		fb->draw_text(line.text.c_str(), text_pos, font, color);
-		text_pos = {rect.position().x, text_pos.y + font->bounding_box().height};
+		text_pos = {rect.x, text_pos.y + line.rect.height};
 	}
+}
+
+void UI::DrawContext::draw_text(const char* str, Gfx::Rect rect, TextAlignment h_align, TextAlignment v_align, Font* font, Gfx::Color color, TruncationMode truncation) const {
+	BasicTextStorage storage {str};
+	auto storage_ptr = Duck::Ptr<BasicTextStorage>(&storage, [](BasicTextStorage* ){});
+	draw_text(TextLayout(storage_ptr, rect.dimensions(), font, truncation, TextLayout::BreakMode::WORD), rect, h_align, v_align, color);
 }
 
 void UI::DrawContext::draw_text(const char* str, Gfx::Point point, Font* font, Gfx::Color color) const {
@@ -200,10 +157,7 @@ void UI::DrawContext::draw_image(const std::string& name, Gfx::Point pos) const 
 	draw_image(Theme::image(name), pos);
 }
 
-void UI::DrawContext::draw_inset_rect(Gfx::Rect rect, Gfx::Color bg, Gfx::Color shadow_1, Gfx::Color shadow_2, Gfx::Color highlight) const {
-	//Background
-	fb->fill({rect.x, rect.y, rect.width, rect.height}, bg);
-
+void UI::DrawContext::draw_inset_outline(Gfx::Rect rect, Gfx::Color shadow_1, Gfx::Color shadow_2, Gfx::Color highlight) const {
 	//Shadow
 	fb->fill({rect.x, rect.y, rect.width, 1}, shadow_1);
 	fb->fill({rect.x, rect.y + 1, 1, rect.height - 1}, shadow_1);
@@ -215,17 +169,37 @@ void UI::DrawContext::draw_inset_rect(Gfx::Rect rect, Gfx::Color bg, Gfx::Color 
 	fb->fill({rect.x + rect.width - 1, rect.y + 1, 1, rect.height - 1}, highlight);
 }
 
+void UI::DrawContext::draw_inset_outline(Gfx::Rect rect) const {
+	draw_inset_outline(rect, Theme::shadow_1(), Theme::shadow_2(), Theme::highlight());
+}
+
+void UI::DrawContext::draw_inset_rect(Gfx::Rect rect, Gfx::Color bg1, Gfx::Color bg2, Gfx::Color shadow_1, Gfx::Color shadow_2, Gfx::Color highlight) const {
+	fb->fill_gradient_v(rect, bg1, bg2);
+	draw_inset_outline(rect, shadow_1, shadow_2, highlight);
+}
+
+void UI::DrawContext::draw_inset_rect(Gfx::Rect rect, Gfx::Color bg, Gfx::Color shadow_1, Gfx::Color shadow_2, Gfx::Color highlight) const {
+	draw_inset_rect(rect, bg, bg, shadow_1, shadow_2, highlight);
+}
+
+void UI::DrawContext::draw_inset_rect(Gfx::Rect rect, Gfx::Color bg1, Gfx::Color bg2) const {
+	draw_inset_rect(rect, bg1, bg2, shadow1(bg1), shadow2(bg1), highlighted(bg1));
+}
+
 void UI::DrawContext::draw_inset_rect(Gfx::Rect rect, Gfx::Color bg) const {
-	draw_inset_rect(rect, bg, Theme::shadow_1(), Theme::shadow_2(), Theme::highlight());
+	draw_inset_rect(rect, bg, shadow1(bg), shadow2(bg), highlighted(bg));
 }
 
 void UI::DrawContext::draw_inset_rect(Gfx::Rect rect) const {
 	draw_inset_rect(rect, Theme::bg(), Theme::shadow_1(), Theme::shadow_2(), Theme::highlight());
 }
 
-void UI::DrawContext::draw_outset_rect(Gfx::Rect rect, Gfx::Color bg, Gfx::Color shadow_1, Gfx::Color shadow_2, Gfx::Color highlight) const {
+void UI::DrawContext::draw_outset_rect(Gfx::Rect rect, Gfx::Color bg1, Gfx::Color bg2, Gfx::Color shadow_1, Gfx::Color shadow_2, Gfx::Color highlight) const {
 	//Background
-	fb->fill({rect.x, rect.y, rect.width, rect.height}, bg);
+	if((rect.width * 2) > rect.height)
+		fb->fill_gradient_v(rect, bg1, bg2);
+	else
+		fb->fill_gradient_h(rect, bg1, bg2);
 
 	//Shadow
 	fb->fill({rect.x, rect.y + rect.height - 1, rect.width - 1, 1}, shadow_2);
@@ -238,8 +212,16 @@ void UI::DrawContext::draw_outset_rect(Gfx::Rect rect, Gfx::Color bg, Gfx::Color
 	fb->fill({rect.x, rect.y + 1, 1, rect.height - 2}, highlight);
 }
 
+void UI::DrawContext::draw_outset_rect(Gfx::Rect rect, Gfx::Color bg, Gfx::Color shadow_1, Gfx::Color shadow_2, Gfx::Color highlight) const {
+	draw_outset_rect(rect, bg, bg.darkened(), shadow_1, shadow_2, highlight);
+}
+
+void UI::DrawContext::draw_outset_rect(Gfx::Rect rect, Gfx::Color bg1, Gfx::Color bg2) const {
+	draw_outset_rect(rect, bg1, bg2, shadow1(bg1), shadow2(bg1), highlighted(bg1));
+}
+
 void UI::DrawContext::draw_outset_rect(Gfx::Rect rect, Gfx::Color bg) const {
-	draw_outset_rect(rect, bg, Theme::shadow_1(), Theme::shadow_2(), Theme::highlight());
+	draw_outset_rect(rect, bg, shadow1(bg), shadow2(bg), highlighted(bg));
 }
 
 void UI::DrawContext::draw_outset_rect(Gfx::Rect rect) const {
@@ -247,10 +229,14 @@ void UI::DrawContext::draw_outset_rect(Gfx::Rect rect) const {
 }
 
 void UI::DrawContext::draw_button_base(Gfx::Rect button, bool pressed) const {
+	draw_button_base(button, pressed, Theme::button());
+}
+
+void UI::DrawContext::draw_button_base(Gfx::Rect button, bool pressed, Gfx::Color color) const {
 	if(pressed) {
-		draw_inset_rect(button, Theme::button());
+		draw_inset_rect(button, color);
 	} else {
-		draw_outset_rect(button, Theme::button());
+		draw_outset_rect(button, color);
 	}
 }
 
@@ -277,16 +263,25 @@ void UI::DrawContext::draw_button(Gfx::Rect rect, Duck::Ptr<const Image> img, bo
 }
 
 void UI::DrawContext::draw_vertical_scrollbar(Gfx::Rect area, Gfx::Rect handle_area, bool enabled) const {
-	fb->fill(area, UI::Theme::color("scrollbar-bg"));
-	draw_outset_rect(handle_area, enabled ? UI::Theme::color("scrollbar-handle") : UI::Theme::color("scrollbar-handle-disabled"));
+	fb->fill(area, Theme::scrollbar_bg());
+	auto handle_color = enabled ? Theme::scrollbar_handle() : Theme::scrollbar_handle_disabled();
+	auto notch_color = handle_color.darkened(0.5);
+	draw_outset_rect(handle_area, handle_color);
+	if (enabled) {
+		fill({handle_area.x + 2, handle_area.y + handle_area.height / 2 - 2, handle_area.width - 5, 1}, notch_color);
+		fill({handle_area.x + 2, handle_area.y + handle_area.height / 2, handle_area.width - 5, 1}, notch_color);
+		fill({handle_area.x + 2, handle_area.y + handle_area.height / 2 + 2, handle_area.width - 5, 1}, notch_color);
+	}
 }
 
 void UI::DrawContext::draw_progressbar(Gfx::Rect area, double progress) const {
 	draw_inset_rect(area);
-	fb->fill({
-		area.x + 2,
-		area.y + 2,
-		(int)((area.width - 4) * progress),
-		area.height - 3
-	}, UI::Theme::accent());
+	if(progress != 0) {
+		draw_outset_rect({
+			area.x + 2,
+			area.y + 2,
+			(int) ((area.width - 4) * progress),
+			area.height - 3
+		}, UI::Theme::accent());
+	}
 }

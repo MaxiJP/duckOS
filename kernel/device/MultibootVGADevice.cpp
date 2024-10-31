@@ -19,7 +19,6 @@
 
 #include <kernel/kstd/defines.h>
 #include "MultibootVGADevice.h"
-#include <kernel/memory/PageDirectory.h>
 #include <kernel/tasking/Process.h>
 #include <kernel/kstd/cstring.h>
 #include <kernel/multiboot.h>
@@ -55,11 +54,11 @@ bool MultibootVGADevice::detect(struct multiboot_info *mboot_header) {
 			textmode = false;
 			break;
 		default:
-			KLog::err("VGA", "Unsupported multiboot framebuffer type %d!", mboot_header->framebuffer_type);
+			KLog::err("VGA", "Unsupported multiboot framebuffer type {}!", mboot_header->framebuffer_type);
 			return false;
 	}
 
-	framebuffer_region = MM.alloc_mapped_region(framebuffer_paddr, framebuffer_size());
+	framebuffer_region = MM.map_device_region(framebuffer_paddr, framebuffer_size());
 	framebuffer = (uint32_t*) framebuffer_region->start();
 
 	return true;

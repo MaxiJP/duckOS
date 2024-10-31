@@ -17,7 +17,6 @@
     Copyright (c) Byteduck 2016-2020. All rights reserved.
 */
 
-#include <kernel/memory/PageDirectory.h>
 #include <kernel/kstd/KLog.h>
 #include "CommandLine.h"
 #include "kernel/memory/MemoryManager.h"
@@ -28,9 +27,9 @@ CommandLine::CommandLine(const struct multiboot_info& header) {
 	if(!_inst)
 		_inst = this;
 	if(header.flags & MULTIBOOT_INFO_CMDLINE) {
-		cmdline = (char*) (header.cmdline + HIGHER_HALF);
+		cmdline = (char*) ((size_t) header.cmdline + HIGHER_HALF);
 
-		KLog::info("CommandLine", "Command line options: '%s'", cmdline.c_str());
+		KLog::info("CommandLine", "Command line options: '{}'", cmdline);
 
 		kstd::string cmd = cmdline;
 		kstd::string part = "";

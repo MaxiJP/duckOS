@@ -23,17 +23,22 @@
 #include <kernel/tasking/TaskManager.h>
 #include "kernel/memory/SafePointer.h"
 
-void syscall_handler(Registers& regs){
-	TaskManager::current_thread()->enter_critical();
-	regs.eax = handle_syscall(regs, regs.eax, regs.ebx, regs.ecx, regs.edx);
-	TaskManager::current_thread()->leave_critical();
+void syscall_handler(ThreadRegisters& regs){
+#if defined(__i386__)
+	TrapFrame frame { nullptr, TrapFrame::Syscall, &regs };
+	TaskManager::current_thread()->enter_trap_frame(&frame);
+	TaskManager::current_thread()->enter_syscall();
+	regs.gp.eax = handle_syscall(regs, regs.gp.eax, regs.gp.ebx, regs.gp.ecx, regs.gp.edx);
+	TaskManager::current_thread()->leave_syscall();
+	TaskManager::current_thread()->exit_trap_frame();
+#endif // TODO: aarch64
 }
 
-int handle_syscall(Registers& regs, uint32_t call, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+int handle_syscall(ThreadRegisters& regs, size_t call, size_t arg1, size_t arg2, size_t arg3) {
 	auto cur_proc = TaskManager::current_thread()->process();
 	switch(call) {
 		case SYS_EXIT:
-			TaskManager::current_thread()->leave_critical();
+			TaskManager::current_thread()->leave_syscall();
 			cur_proc->sys_exit(arg1);
 			return 0;
 		case SYS_FORK:
@@ -144,12 +149,8 @@ int handle_syscall(Registers& regs, uint32_t call, uint32_t arg1, uint32_t arg2,
 			return cur_proc->sys_fchown((int)arg1, (uid_t)arg2, (gid_t)arg3);
 		case SYS_LCHOWN:
 			return cur_proc->sys_lchown((char*)arg1, (uid_t)arg2, (gid_t)arg3);
-		case SYS_MMAP: {
-			auto res = cur_proc->sys_mmap((struct mmap_args*) arg1);
-			if(res.is_error())
-				return -res.code();
-			return (int) res.value();
-		}
+		case SYS_MMAP:
+			return -cur_proc->sys_mmap((struct mmap_args*) arg1).code();
 		case SYS_MUNMAP:
 			return cur_proc->sys_munmap((void*) arg1, (size_t) arg2);
 		case SYS_IOCTL:
@@ -157,7 +158,7 @@ int handle_syscall(Registers& regs, uint32_t call, uint32_t arg1, uint32_t arg2,
 		case SYS_GETPPID:
 			return cur_proc->ppid();
 		case SYS_SHMCREATE:
-			return cur_proc->sys_shmcreate((void*) arg1, (size_t) arg2, (struct shm*) arg3);
+			return cur_proc->sys_shmcreate((shmcreate_args*) arg1);
 		case SYS_SHMATTACH:
 			return cur_proc->sys_shmattach((int) arg1, (void*) arg2, (struct shm*) arg3);
 		case SYS_SHMDETACH:
@@ -186,6 +187,35 @@ int handle_syscall(Registers& regs, uint32_t call, uint32_t arg1, uint32_t arg2,
 			return cur_proc->sys_mprotect((void*) arg1, (size_t) arg2, arg3);
 		case SYS_UNAME:
 			return cur_proc->sys_uname((struct utsname*) arg1);
+		case SYS_PTRACE:
+			return cur_proc->sys_ptrace((struct ptrace_args*) arg1);
+		case SYS_SOCKET:
+			return cur_proc->sys_socket(arg1, arg2, arg3);
+		case SYS_BIND:
+			return cur_proc->sys_bind(arg1, (struct sockaddr*) arg2, arg3);
+		case SYS_SETSOCKOPT:
+			return cur_proc->sys_setsockopt((struct setsockopt_args*) arg1);
+		case SYS_GETSOCKOPT:
+			return cur_proc->sys_getsockopt((struct getsockopt_args*) arg1);
+		case SYS_SENDMSG:
+			return cur_proc->sys_sendmsg(arg1, (struct msghdr*) arg2, arg3);
+		case SYS_RECVMSG:
+			return cur_proc->sys_recvmsg(arg1, (struct msghdr*) arg2, arg3);
+		case SYS_GETIFADDRS:
+			return cur_proc->sys_getifaddrs((struct ifaddrs*) arg1, (size_t) arg2);
+		case SYS_CONNECT:
+			return cur_proc->sys_connect(arg1, (struct sockaddr*) arg2, arg3);
+		case SYS_LISTEN:
+			return cur_proc->sys_listen(arg1, arg2);
+		case SYS_SHUTDOWN:
+			return cur_proc->sys_shutdown(arg1, arg2);
+		case SYS_ACCEPT:
+			return cur_proc->sys_accept(arg1, (struct sockaddr*) arg2, (uint32_t*) arg3);
+		case SYS_FUTEX:
+			return cur_proc->sys_futex((int*) arg1, arg2);
+		case SYS_YIELD:
+			TaskManager::yield();
+			return 0;
 
 		//TODO: Implement these syscalls
 		case SYS_TIMES:

@@ -47,6 +47,7 @@ namespace UI {
 		std::shared_ptr<Widget> contents();
 		void set_title(const std::string& title);
 		std::string title();
+		void set_icon(Duck::Ptr<const Gfx::Image> icon);
 		void set_resizable(bool resizable);
 		bool resizable();
 		bool is_focused();
@@ -54,6 +55,7 @@ namespace UI {
 
 		///Window management
 		void bring_to_front();
+		void focus();
 		void repaint();
 		void repaint_now();
 		void close();
@@ -62,6 +64,7 @@ namespace UI {
 		void resize_to_contents();
 		void set_uses_alpha(bool uses_alpha);
 		void set_decorated(bool decorated);
+		bool decorated() const { return _decorated; }
 
 		///Pond
 		Pond::Window* pond_window();
@@ -83,6 +86,7 @@ namespace UI {
 		void calculate_layout();
 
 		std::weak_ptr<WindowDelegate> delegate;
+		std::function<void()> on_close;
 
 	protected:
 		Window();
@@ -101,8 +105,9 @@ namespace UI {
 		std::string _title;
 		Gfx::Point _mouse;
 		Gfx::Point _abs_mouse;
+		Duck::Ptr<const Gfx::Image> _icon;
 		bool _decorated = true;
-		bool _uses_alpha = false;
+		bool _uses_alpha = true;
 		bool _resizable = false;
 		bool _needs_repaint = false;
 		bool _focused = false;

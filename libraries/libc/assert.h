@@ -26,8 +26,8 @@
 	#define assert(ignore) ((void)0)
 #else
 	__DECL_BEGIN
-	void __assert_failed(const char* file, int line, const char* func, const char* expr);
-	#define assert(expr) ((expr) ? (void)0 : __assert_failed(__FILE__, __LINE__, __FUNCTION__, #expr));
+	void __attribute__((noreturn)) __assert_failed(const char* file, int line, const char* func, const char* expr);
+	#define assert(expr) ((expr) ? (void) 0 : __assert_failed(__FILE__, __LINE__, __FUNCTION__, #expr))
 	__DECL_END
 #endif //NDEBUG
 

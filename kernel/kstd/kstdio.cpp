@@ -23,11 +23,14 @@
 #include <kernel/tasking/TaskManager.h>
 #include <kernel/terminal/VirtualTTY.h>
 #include <kernel/kstd/defines.h>
-#include <kernel/IO.h>
+#include "kernel/IO.h"
 #include <kernel/KernelMapper.h>
 #include <kernel/interrupt/interrupt.h>
 #include "cstring.h"
+#include <kernel/device/VGADevice.h>
 #include <kernel/filesystem/FileDescriptor.h>
+#include <kernel/bootlogo.h>
+#include <kernel/arch/Processor.h>
 
 kstd::Arc<FileDescriptor> tty_desc(nullptr);
 kstd::Arc<VirtualTTY> tty(nullptr);
@@ -45,28 +48,6 @@ void putch(char c){
 	serial_putch(c);
 }
 
-void serial_putch(char c) {
-	static bool serial_inited = false;
-	if(!serial_inited) {
-		IO::outb(0x3F9, 0x00);
-		IO::outb(0x3FB, 0x80);
-		IO::outb(0x3F8, 0x02);
-		IO::outb(0x3F9, 0x00);
-		IO::outb(0x3FB, 0x03);
-		IO::outb(0x3FA, 0xC7);
-		IO::outb(0x3FC, 0x0B);
-		serial_inited = true;
-	}
-
-	while (!(IO::inb(0x3FD) & 0x20u));
-
-	if(c == '\n') {
-		IO::outb(0x3F8, '\r');
-		while (!(IO::inb(0x3FD) & 0x20u));
-	}
-	IO::outb(0x3F8, c);
-}
-
 void print(const char* str){
 	if(did_setup_tty) {
 		if(g_panicking || TaskManager::in_critical())
@@ -78,7 +59,7 @@ void print(const char* str){
 		serial_putch(*(str++));
 }
 
-SpinLock printf_lock;
+Mutex printf_lock {"printf"};
 void printf(const char* fmt, ...) {
 	va_list list;
 	va_start(list, fmt);
@@ -92,23 +73,34 @@ void vprintf(const char* fmt, va_list argp){
 
 	const char *p;
 	int i;
+	long l;
 	char *s;
 	char fmtbuf[256];
+	bool is_long = false;
 
 	for(p = fmt; *p != '\0'; p++){
 		if(*p != '%'){
 			putch(*p);
 			continue;
 		}
+		fmt_eval:
 		switch(*++p){
+			case 'l':
+				is_long = true;
+				goto fmt_eval;
 			case 'c':
 				i = va_arg(argp, int);
 				putch(i);
 				break;
 
 			case 'd':
-				i = va_arg(argp, int);
-				s = itoa(i, fmtbuf, 10);
+				if (is_long) {
+					l = va_arg(argp, long);
+					s = ltoa(l, fmtbuf, 10);
+				} else {
+					i = va_arg(argp, int);
+					s = itoa(i, fmtbuf, 10);
+				}
 				print(s);
 				break;
 
@@ -118,21 +110,36 @@ void vprintf(const char* fmt, va_list argp){
 				break;
 
 			case 'x':
-				i = va_arg(argp, int);
-				s = itoa(i, fmtbuf, 16);
+				if (is_long) {
+					l = va_arg(argp, long);
+					s = ltoa(l, fmtbuf, 16);
+				} else {
+					i = va_arg(argp, int);
+					s = itoa(i, fmtbuf, 16);
+				}
 				print(s);
 				break;
 
 			case 'X':
-				i = va_arg(argp, int);
-				s = itoa(i, fmtbuf, 16);
+				if (is_long) {
+					l = va_arg(argp, long);
+					s = ltoa(l, fmtbuf, 16);
+				} else {
+					i = va_arg(argp, int);
+					s = itoa(i, fmtbuf, 16);
+				}
 				to_upper(s);
 				print(s);
 				break;
 
 			case 'b':
-				i = va_arg(argp, int);
-				s = itoa(i, fmtbuf, 2);
+				if (is_long) {
+					l = va_arg(argp, long);
+					s = ltoa(l, fmtbuf, 2);
+				} else {
+					i = va_arg(argp, int);
+					s = itoa(i, fmtbuf, 2);
+				}
 				print(s);
 				break;
 
@@ -140,6 +147,7 @@ void vprintf(const char* fmt, va_list argp){
 				putch('%');
 				break;
 		}
+		is_long = false;
 	}
 
 	if(!g_panicking && !TaskManager::in_critical())
@@ -148,33 +156,65 @@ void vprintf(const char* fmt, va_list argp){
 
 bool panicked = false;
 
-[[noreturn]] void PANIC(const char* error, const char* msg, ...){
+void panic_inner(const char* error, const char* msg, va_list list) {
 	TaskManager::enter_critical();
 	Interrupt::NMIDisabler disabler;
 
 	g_panicking = true;
-	if(did_setup_tty)
+	if(did_setup_tty) {
 		tty->set_graphical(false);
+		tty->get_terminal()->set_prevent_scroll(true);
+	}
 
 	printf("\033[41;97m\033[2J"); //Red BG, bright white FG
+
+	// Draw logo
+	auto disp_width = VGADevice::inst().get_display_width();
+	auto disp_height = VGADevice::inst().get_display_height();
+	for(size_t y = 0; y < BOOT_LOGO_HEIGHT * BOOT_LOGO_SCALE; y++) {
+		for(size_t x = 0; x < BOOT_LOGO_WIDTH * BOOT_LOGO_SCALE; x++) {
+			auto color = boot_logo[(x / BOOT_LOGO_SCALE) + (y / BOOT_LOGO_SCALE) * BOOT_LOGO_WIDTH];
+			if (color)
+				VGADevice::inst().set_pixel(
+					x + disp_width - BOOT_LOGO_WIDTH * BOOT_LOGO_SCALE - 5,
+					y + disp_height - BOOT_LOGO_HEIGHT * BOOT_LOGO_SCALE - 5,
+					color);
+		}
+	}
+
 	print("Whoops! Something terrible happened.\nIf you weren't expecting this, please open an issue on GitHub to report it.\nHere are the details:\n");
 	printf("%s\n", error);
+	auto cur_thread = TaskManager::current_thread();
+	if(cur_thread && cur_thread->process())
+		printf("In pid: %d (%s) tid: %d\n", cur_thread->process()->pid(), cur_thread->process()->name().c_str(), cur_thread->tid());
+	else
+		printf("[No thread info]\n");
 
-	va_list list;
-	va_start(list, msg);
 	vprintf(msg, list);
-	va_end(list);
 
 	//Printing the stacktrace may panic if done early in kernel initialization. Don't print stacktrace in a nested panic.
-#ifdef DEBUG
+#ifdef DUCKOS_KERNEL_DEBUG_SYMBOLS
 	if(!panicked) {
 		panicked = true;
 		printf("\n\nStack trace:\n");
 		KernelMapper::print_stacktrace();
 	}
 #endif
+}
 
-	asm volatile("cli; hlt");
+void PANIC_NOHLT(const char *error, const char *msg, ...) {
+	va_list list;
+	va_start(list, msg);
+	panic_inner(error, msg, list);
+	va_end(list);
+}
+
+[[noreturn]] void PANIC(const char* error, const char* msg, ...) {
+	va_list list;
+	va_start(list, msg);
+	panic_inner(error, msg, list);
+	va_end(list);
+	Processor::halt();
 	while(1);
 }
 

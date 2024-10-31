@@ -17,14 +17,14 @@
 	Copyright (c) Byteduck 2016-2021. All rights reserved.
 */
 
-#include <kernel/random.h>
-#include <kernel/tasking/TaskManager.h>
-#include <kernel/IO.h>
+#include "kernel/random.h"
+#include "kernel/tasking/TaskManager.h"
+#include "kernel/IO.h"
 #include "MouseDevice.h"
 #include "I8042.h"
-#include "../VMWare.h"
-#include <kernel/kstd/cstring.h>
-#include <kernel/kstd/KLog.h>
+#include "kernel/VMWare.h"
+#include "kernel/kstd/cstring.h"
+#include "kernel/kstd/KLog.h"
 
 MouseDevice* MouseDevice::instance;
 
@@ -98,7 +98,7 @@ ssize_t MouseDevice::write(FileDescriptor &fd, size_t offset, SafePointer<uint8_
 	return 0;
 }
 
-void MouseDevice::handle_irq(Registers *regs) {
+void MouseDevice::handle_irq(IRQRegisters *regs) {
 	I8042::inst().handle_irq();
 }
 

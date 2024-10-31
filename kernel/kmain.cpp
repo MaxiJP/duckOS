@@ -18,21 +18,17 @@
 */
 
 #include "kmain.h"
-#include "kernel/device/AC97Device.h"
 #include "VMWare.h"
 #include <kernel/kstd/kstdio.h>
 #include <kernel/memory/MemoryManager.h>
-#include <kernel/memory/gdt.h>
 #include <kernel/device/Device.h>
 #include <kernel/time/TimeManager.h>
 #include <kernel/interrupt/interrupt.h>
 #include <kernel/CommandLine.h>
-#include <kernel/device/BochsVGADevice.h>
 #include <kernel/device/MultibootVGADevice.h>
 #include <kernel/tasking/TaskManager.h>
 #include <kernel/tasking/Process.h>
 #include <kernel/tasking/Thread.h>
-#include <kernel/device/PATADevice.h>
 #include <kernel/terminal/VirtualTTY.h>
 #include <kernel/filesystem/ext2/Ext2Filesystem.h>
 #include <kernel/device/PartitionDevice.h>
@@ -46,59 +42,49 @@
 #include <kernel/tasking/ProcessArgs.h>
 #include <kernel/kstd/KLog.h>
 #include <kernel/tests/KernelTest.h>
+#include "bootlogo.h"
+#include "arch/Processor.h"
+#include "net/NetworkAdapter.h"
+
+#if defined(__i386__)
+#include "arch/i386/device/PATADevice.h"
+#endif
 
 uint8_t boot_disk;
 
-typedef void (*constructor_func)();
-extern constructor_func start_ctors[];
-extern constructor_func end_ctors[];
-
-//This method should be called with global constructors, so we'll assert that did_constructors == true after we do that
-bool did_constructors = false;
-__attribute__((constructor)) void constructor_test() {
-	did_constructors = true;
-}
-
-//Use a uint8_t array to store the memory manager, or else it would be re-initialized when global constructors are called
-uint8_t __mem_manager_storage[sizeof(MemoryManager)] __attribute__((aligned(4096)));
-
-int kmain(uint32_t mbootptr){
-	// Call global constructors
-	for (constructor_func* ctor = start_ctors; ctor < end_ctors; ctor++)
-		(*ctor)();
-	ASSERT(did_constructors);
-
-	clearScreen();
+void kmain(){
 	KLog::info("kinit", "Starting duckOS...");
 
-	new (__mem_manager_storage) MemoryManager;
-
-	struct multiboot_info mboot_header = parse_mboot(mbootptr);
-	CommandLine cmd_line(mboot_header);
-	Memory::load_gdt();
-	Interrupt::init();
-	MemoryManager::inst().setup_paging();
+	Processor::init();
+	Memory::init();
+	Processor::init_interrupts();
 	VMWare::detect();
 	Device::init();
 
-	//Try setting up VGA
-	BochsVGADevice* bochs_vga = BochsVGADevice::create();
-	if(!bochs_vga) {
-		//We didn't find a bochs VGA device, try using the multiboot VGA device
-		auto* mboot_vga = MultibootVGADevice::create(&mboot_header);
-		if(!mboot_vga || mboot_vga->is_textmode())
-			PANIC("MBOOT_TEXTMODE", "duckOS doesn't support textmode.");
+	// Clear screen and draw boot logo
+	clearScreen();
+	size_t logo_pos[2] = {
+		VGADevice::inst().get_display_width() / 2 - (BOOT_LOGO_WIDTH * BOOT_LOGO_SCALE) / 2,
+		VGADevice::inst().get_display_height() / 2 - (BOOT_LOGO_HEIGHT * BOOT_LOGO_SCALE) / 2
+	};
+	for(size_t y = 0; y < BOOT_LOGO_HEIGHT * BOOT_LOGO_SCALE; y++) {
+		for(size_t x = 0; x < BOOT_LOGO_WIDTH * BOOT_LOGO_SCALE; x++) {
+			VGADevice::inst().set_pixel(logo_pos[0] + x, logo_pos[1] + y, boot_logo[(x / BOOT_LOGO_SCALE) + (y / BOOT_LOGO_SCALE) * BOOT_LOGO_WIDTH]);
+		}
 	}
 
-	clearScreen();
+	auto* tty0 = new VirtualTTY(4, 0);
+	tty0->set_active();
+	setup_tty();
+
 #ifdef DEBUG
 	KLog::info("kinit", "Debug mode is enabled.");
 #endif
 	KLog::dbg("kinit", "First stage complete.");
 	
 	TaskManager::init();
+
 	ASSERT(false); //We should never get here
-	return 0;
 }
 
 void kmain_late(){
@@ -106,10 +92,12 @@ void kmain_late(){
 
 	TimeManager::init();
 
-	auto* tty0 = new VirtualTTY(4, 0);
-	tty0->set_active();
-	setup_tty();
 
+#if defined(__aarch64__)
+	KLog::dbg("kinit", "TODO aarch64");
+	while (1);
+	// TODO: aarch64
+#elif defined(__i386__)
 	KLog::dbg("kinit", "Initializing disk...");
 
 	//Setup the disk (Assumes we're using primary master drive
@@ -144,14 +132,17 @@ void kmain_late(){
 	auto* ext2fs = new Ext2Filesystem(part_descriptor);
 	ext2fs->init();
 	if(ext2fs->superblock.version_major < 1){
-		KLog::crit("kinit", "Unsupported ext2 version %d.%d. Must be at least 1. Hanging.", ext2fs->superblock.version_major, ext2fs->superblock.version_minor);
+		KLog::crit("kinit", "Unsupported ext2 version {}.{}. Must be at least 1. Hanging.",
+					ext2fs->superblock.version_major, ext2fs->superblock.version_minor);
 		while(true);
 	}
 
-	KLog::dbg("kinit", "Partition is ext2 %d.%d", ext2fs->superblock.version_major, ext2fs->superblock.version_minor);
+	KLog::dbg("kinit", "Partition is ext2 {}.{}", ext2fs->superblock.version_major, ext2fs->superblock.version_minor);
 
 	if(ext2fs->superblock.inode_size != 128){
-		KLog::crit("kinit", "Unsupported inode size %d. DuckOS only supports an inode size of 128 at this time. Hanging.", ext2fs->superblock.inode_size);
+		KLog::crit("kinit",
+					"Unsupported inode size {}. DuckOS only supports an inode size of 128 at this time. Hanging.",
+					ext2fs->superblock.inode_size);
 		while(1);
 	}
 
@@ -166,50 +157,50 @@ void kmain_late(){
 	auto root_user = User::root();
 	auto proc_or_err = VFS::inst().resolve_path("/proc", VFS::inst().root_ref(), root_user);
 	if(proc_or_err.is_error()) {
-		KLog::crit("kinit", "Failed to mount proc: %d", proc_or_err.code());
+		KLog::crit("kinit", "Failed to mount proc: {}", proc_or_err.code());
 		while(true);
 	}
 
 	auto* procfs = new ProcFS();
 	auto res = VFS::inst().mount(procfs, proc_or_err.value());
 	if(res.is_error()) {
-		KLog::crit("kinit", "Failed to mount proc: %d", res.code());
+		KLog::crit("kinit", "Failed to mount proc: {}", res.code());
 		while(true);
 	}
 
 	//Mount SocketFS
 	auto sock_or_err = VFS::inst().resolve_path("/sock", VFS::inst().root_ref(), root_user);
 	if(sock_or_err.is_error()) {
-		KLog::crit("kinit", "Failed to mount sock: %d", sock_or_err.code());
+		KLog::crit("kinit", "Failed to mount sock: {}", sock_or_err.code());
 		while(true);
 	}
 
 	auto* socketfs = new SocketFS();
 	res = VFS::inst().mount(socketfs, sock_or_err.value());
 	if(res.is_error()) {
-		KLog::crit("kinit", "Failed to mount sock: %d", res.code());
+		KLog::crit("kinit", "Failed to mount sock: {}", res.code());
 		while(true);
 	}
 
 	//Mount PTYFS
 	auto pts_or_err = VFS::inst().resolve_path("/dev/pts", VFS::inst().root_ref(), root_user);
 	if(pts_or_err.is_error()) {
-		KLog::crit("kinit", "Failed to mount pts: %d", pts_or_err.code());
+		KLog::crit("kinit", "Failed to mount pts: {}", pts_or_err.code());
 		while(true);
 	}
 
 	auto* ptyfs = new PTYFS();
 	res = VFS::inst().mount(ptyfs, pts_or_err.value());
 	if(res.is_error()) {
-		KLog::crit("kinit", "Failed to mount pts: %d", res.code());
+		KLog::crit("kinit", "Failed to mount pts: {}", res.code());
 		while(true);
 	}
 
 	//Load the kernel symbols
 	KernelMapper::load_map();
 
-	//Try initializing the sound card
-	auto dev = AC97Device::detect();
+	//Try initializing network
+	NetworkAdapter::setup();
 
 	//If we're running tests, do so
 	if(CommandLine::inst().get_option_value("kernel-tests") == "true") {
@@ -227,26 +218,5 @@ void kmain_late(){
 	//We shouldn't get here
 	PANIC("INIT_FAILED", "Failed to start init.");
 	ASSERT(false);
-}
-
-struct multiboot_info parse_mboot(uint32_t physaddr){
-	auto* header = (struct multiboot_info*) (physaddr + HIGHER_HALF);
-
-	//Check boot disk
-	if(header->flags & MULTIBOOT_INFO_BOOTDEV) {
-		boot_disk = (header->boot_device & 0xF0000000u) >> 28u;
-		KLog::dbg("kinit", "BIOS boot disk: 0x%x", boot_disk);
-	} else {
-		PANIC("MULTIBOOT_FAIL", "The multiboot header doesn't have boot device info. Cannot boot.");
-	}
-
-	//Parse memory map
-	if(header->flags & MULTIBOOT_INFO_MEM_MAP) {
-		auto* mmap_entry = (multiboot_mmap_entry*) (header->mmap_addr + HIGHER_HALF);
-		MemoryManager::inst().parse_mboot_memory_map(header, mmap_entry);
-	} else {
-		PANIC("MULTIBOOT_FAIL", "The multiboot header doesn't have a memory map. Cannot boot.");
-	}
-
-	return *header;
+#endif
 }

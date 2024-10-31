@@ -24,7 +24,9 @@ namespace UI {
 
 		// MenuWidget
 		static Duck::Ptr<MenuWidget> open_menu(Duck::Ptr<Menu> menu, Gfx::Point location);
+		void close();
 
+		std::function<void()> on_close = nullptr;
 	private:
 		explicit MenuWidget(Duck::Ptr<Menu> menu, Duck::PtrRef<Window> window);
 
@@ -36,7 +38,21 @@ namespace UI {
 		void open_child_window(Duck::Ptr<Menu> menu, Gfx::Rect item_rect);
 		Duck::WeakPtr<MenuWidget> root_menu();
 		bool any_are_focused();
-		void close();
+		void open();
+
+		//Windows
+		static Duck::Ptr<MenuWidget> create_menu(Duck::Ptr<Menu> menu, Gfx::Point location, bool submenu);
+
+		// Window management
+		static Duck::Ptr<Window> acquire_menu_window();
+		static void release_menu_window(Duck::PtrRef<Window> window);
+		static void release_all_menu_windows();
+
+		struct MenuWindow {
+			Duck::Ptr<Window> window;
+			bool used;
+		};
+		static std::vector<MenuWindow> s_windows;
 
 		Duck::Ptr<Menu> m_menu;
 		Duck::Ptr<MenuItem> m_hovered_item;

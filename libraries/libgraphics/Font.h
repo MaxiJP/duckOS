@@ -40,7 +40,7 @@ namespace Gfx {
 			int y = 0;
 		} next_offset; ///< The offset of the next glyph from the origin of this glyph
 
-		Color bitmap[]; ///< The actual pixels making up the glyph. Should be grayscale.
+		uint8_t bitmap[]; ///< The actual pixels making up the glyph. Should be grayscale.
 	};
 
 	struct FontData {
@@ -72,7 +72,7 @@ namespace Gfx {
 
 		FontGlyph* glyph(uint32_t codepoint);
 
-		Dimensions size_of(const char* string);
+		Dimensions size_of(std::string_view string);
 
 	private:
 		explicit Font(shm fontshm);
